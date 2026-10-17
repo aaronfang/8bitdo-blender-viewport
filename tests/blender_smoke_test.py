@@ -39,6 +39,38 @@ def test_input_math():
     half = addon.exponential_blend(0.0, 1.0, 10.0, 0.05)
     two_halves = addon.exponential_blend(half, 1.0, 10.0, 0.05)
     assert_close(full, two_halves)
+    assert_close(addon.smoothstep(0.0), 0.0)
+    assert_close(addon.smoothstep(0.5), 0.5)
+    assert_close(addon.smoothstep(1.0), 1.0)
+    assert_close(addon.adaptive_response(0.0, 2.0), 0.0)
+    assert_close(addon.adaptive_response(0.5, 2.0), 0.75)
+    assert_close(addon.adaptive_response(1.0, 2.0), 1.0)
+    assert addon.adaptive_response(0.5, 4.0) > addon.adaptive_response(0.5, 1.0)
+
+
+def test_adaptive_scene_speed_interaction():
+    session = addon.GamepadNavigationSession
+    prefs = SimpleNamespace(
+        fly_speed=10.0,
+        scene_scale_speed=True,
+        adaptive_speed=True,
+        adaptive_min_speed=0.05,
+    )
+    session.speed_gear = 0
+    session.scene_speed_scale = 100.0
+
+    session.adaptive_speed_scale = 1.0
+    assert_close(session.calculate_fly_speed(prefs), 1000.0)
+    assert_close(session.active_scene_scale, 100.0)
+
+    session.adaptive_speed_scale = 0.05
+    assert_close(session.calculate_fly_speed(prefs), 0.5)
+    assert_close(session.active_scene_scale, 1.0)
+
+    session.adaptive_speed_scale = 0.525
+    speed = session.calculate_fly_speed(prefs)
+    assert_close(session.active_scene_scale, 50.5)
+    assert_close(speed, 265.125)
 
 
 def test_button_edges():
@@ -266,6 +298,7 @@ def main():
     addon.register()
     try:
         test_input_math()
+        test_adaptive_scene_speed_interaction()
         test_button_edges()
         test_scene_scale()
         test_edit_component_pivot_and_unchanged_view()

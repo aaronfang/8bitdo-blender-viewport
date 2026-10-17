@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 3, 1),
+    "version": (1, 4, 0),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -116,32 +116,94 @@ def exponential_blend(current, target, response, dt):
     return current + (target - current) * factor
 
 
+def smoothstep(value):
+    value = max(0.0, min(value, 1.0))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def adaptive_response(distance_ratio, curve):
+    """Return 0 at the surface and 1 at or beyond the start distance."""
+    eased = smoothstep(distance_ratio)
+    return 1.0 - (1.0 - eased) ** max(curve, 0.001)
+
+
 def draw_gamepad_status():
     session = GamepadNavigationSession
-    if not session.active or not session.show_hud:
+    if not session.active or not (session.show_hud or session.show_control_hud):
         return
     try:
-        if bpy.context.area != session.area:
+        current_area = bpy.context.area
+        if (
+            current_area is None
+            or session.area is None
+            or current_area.as_pointer() != session.area.as_pointer()
+        ):
             return
     except ReferenceError:
         return
 
-    status = session.effective_mode
-    status += f"  SPEED {10.0 ** session.speed_gear:g}x"
-    if session.effective_mode == "FLY":
-        status += f"  {session.current_fly_speed:.2f} u/s"
-    if session.height_locked:
-        status += "  HEIGHT LOCK"
-    if session.ground_walk:
-        status += "  GROUND"
-    if not session.connected:
-        status += "  CONTROLLER DISCONNECTED"
-
     font_id = 0
-    blf.position(font_id, 18, 42, 0)
-    blf.size(font_id, 14.0)
-    blf.color(font_id, 0.92, 0.95, 1.0, 0.9)
-    blf.draw(font_id, status)
+    blf.size(font_id, 13.0)
+    blf.color(font_id, 0.94, 0.97, 1.0, 0.95)
+
+    lines = []
+    if session.show_hud:
+        connection = "Connected" if session.connected else "Disconnected"
+        lines.append(f"GAMEPAD  {session.effective_mode}  |  {connection}")
+        if session.effective_mode == "FLY":
+            lines.append(
+                f"Move  {session.current_fly_speed:.3g} u/s  |  "
+                f"Gear {10.0 ** session.speed_gear:g}x  |  "
+                f"Look {session.fly_look_speed:.3g} rad/s"
+            )
+            lines.append(
+                f"Scene {session.active_scene_scale:.3g}x  |  "
+                f"Adaptive {session.adaptive_speed_scale:.3g}x"
+            )
+            if session.adaptive_surface_distance is None:
+                lines.append("Surface  no hit")
+            else:
+                lines.append(
+                    f"Surface  {session.adaptive_surface_distance:.3g} / "
+                    f"{session.adaptive_start_distance:.3g} u"
+                )
+        else:
+            boost = "  |  Boost 3x" if session.orbit_boost else ""
+            lines.append(
+                f"Orbit {session.orbit_speed:.3g} rad/s  |  "
+                f"Pan {session.pan_speed:.3g}  |  Zoom {session.zoom_speed:.3g}"
+                f"{boost}"
+            )
+        flags = []
+        if session.height_locked:
+            flags.append("HEIGHT LOCK")
+        if session.ground_walk:
+            flags.append("GROUND")
+        if session.horizon_active:
+            flags.append("HORIZON")
+        if session.clipping_active:
+            flags.append("DYNAMIC CLIP")
+        if flags:
+            lines.append("  |  ".join(flags))
+
+    if session.show_control_hud:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                "LS Move/Pan    RS Look/Orbit    LT/RT Vertical/Zoom",
+                "LB Tap Toggle    LB/L3/R3 Hold Temporary Mode",
+                "RB Height Lock / Orbit Boost    D-pad Up/Down Speed",
+                "A Focus    B Face    X Ground    Y Level Horizon",
+                "D-pad Left/Right History    Back Stop",
+            )
+        )
+
+    y = 54
+    for line in reversed(lines):
+        blf.position(font_id, 18, y, 0)
+        blf.draw(font_id, line)
+        y += 18
 
 
 class GamepadViewBookmark(bpy.types.PropertyGroup):
@@ -277,9 +339,37 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         description="Slow Fly movement when approaching visible geometry",
         default=False,
     )
+    adaptive_start_distance: FloatProperty(
+        name="Adaptive Start Distance",
+        description="Distance from the surface at which Fly speed starts decreasing",
+        default=5.0,
+        min=0.001,
+        max=1000000.0,
+        subtype="DISTANCE",
+    )
+    adaptive_min_speed: FloatProperty(
+        name="Adaptive Minimum Speed",
+        description="Minimum fraction of base Fly speed at the surface",
+        default=0.05,
+        min=0.001,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    adaptive_curve: FloatProperty(
+        name="Adaptive Curve",
+        description="Higher values keep full speed longer, then slow closer to the surface",
+        default=2.0,
+        min=0.25,
+        max=8.0,
+    )
     show_hud: BoolProperty(
         name="Viewport Status",
         description="Show navigation mode and speed in the viewport",
+        default=True,
+    )
+    show_control_hud: BoolProperty(
+        name="Control Help",
+        description="Show the controller mapping in the viewport lower-left corner",
         default=True,
     )
     transition_duration: FloatProperty(
@@ -297,7 +387,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     )
     horizon_stabilization: BoolProperty(
         name="Horizon Stabilization",
-        description="Gradually remove view roll while flying",
+        description="Gradually remove sideways camera roll while preserving look direction",
         default=False,
     )
     horizon_strength: FloatProperty(
@@ -316,6 +406,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     )
     ground_step_height: FloatProperty(
         name="Maximum Step",
+        description="Largest upward ground-height change Ground mode can climb in one update",
         default=0.5,
         min=0.0,
         max=100.0,
@@ -383,7 +474,11 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "look_response")
         layout.prop(self, "scene_scale_speed")
         layout.prop(self, "adaptive_speed")
+        layout.prop(self, "adaptive_start_distance")
+        layout.prop(self, "adaptive_min_speed")
+        layout.prop(self, "adaptive_curve")
         layout.prop(self, "show_hud")
+        layout.prop(self, "show_control_hud")
         layout.prop(self, "transition_duration")
         layout.prop(self, "dynamic_clipping")
         layout.prop(self, "horizon_stabilization")
@@ -423,8 +518,19 @@ class GamepadNavigationSession:
     fly_velocity = Vector((0.0, 0.0, 0.0))
     look_velocity = Vector((0.0, 0.0))
     current_fly_speed = 0.0
+    active_scene_scale = 1.0
+    fly_look_speed = 0.0
+    orbit_speed = 0.0
+    pan_speed = 0.0
+    zoom_speed = 0.0
+    orbit_boost = False
     height_locked = False
     show_hud = True
+    show_control_hud = True
+    adaptive_surface_distance = None
+    adaptive_start_distance = 0.0
+    horizon_active = False
+    clipping_active = False
     draw_handler = None
     history_back = []
     history_forward = []
@@ -464,8 +570,21 @@ class GamepadNavigationSession:
         cls.fly_velocity = Vector((0.0, 0.0, 0.0))
         cls.look_velocity = Vector((0.0, 0.0))
         cls.current_fly_speed = 0.0
+        cls.active_scene_scale = 1.0
+        cls.fly_look_speed = addon.preferences.fly_look_speed if addon else 0.0
+        cls.orbit_speed = addon.preferences.orbit_speed if addon else 0.0
+        cls.pan_speed = addon.preferences.pan_speed if addon else 0.0
+        cls.zoom_speed = addon.preferences.zoom_speed if addon else 0.0
+        cls.orbit_boost = False
         cls.height_locked = False
         cls.show_hud = addon.preferences.show_hud if addon else True
+        cls.show_control_hud = addon.preferences.show_control_hud if addon else True
+        cls.adaptive_surface_distance = None
+        cls.adaptive_start_distance = (
+            addon.preferences.adaptive_start_distance if addon else 0.0
+        )
+        cls.horizon_active = False
+        cls.clipping_active = False
         cls.history_back = []
         cls.history_forward = []
         cls.transition_start = None
@@ -497,6 +616,9 @@ class GamepadNavigationSession:
         cls.fly_velocity = Vector((0.0, 0.0, 0.0))
         cls.look_velocity = Vector((0.0, 0.0))
         cls.height_locked = False
+        cls.orbit_boost = False
+        cls.horizon_active = False
+        cls.clipping_active = False
         cls.ground_walk = False
         cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
         if cls.space is not None:
@@ -773,6 +895,8 @@ class GamepadNavigationSession:
     def update_adaptive_speed(cls, prefs, now, rotation):
         if not prefs.adaptive_speed:
             cls.adaptive_speed_scale = 1.0
+            cls.adaptive_surface_distance = None
+            cls.adaptive_start_distance = prefs.adaptive_start_distance
             return
         if now - cls.last_proximity_time < 0.1:
             return
@@ -780,7 +904,8 @@ class GamepadNavigationSession:
 
         origin = cls.camera_position(rotation)
         direction = rotation @ Vector((0.0, 0.0, -1.0))
-        reference = max(cls.scene_speed_scale * 100.0 * 0.02, 0.1)
+        reference = max(prefs.adaptive_start_distance, 0.001)
+        cls.adaptive_start_distance = reference
         try:
             hit, _location, _normal, _index, _object, _matrix = (
                 bpy.context.scene.ray_cast(
@@ -796,9 +921,38 @@ class GamepadNavigationSession:
 
         if hit:
             distance = (Vector(_location) - origin).length
-            cls.adaptive_speed_scale = max(0.05, min(distance / reference, 1.0))
+            cls.adaptive_surface_distance = distance
+            normalized = adaptive_response(
+                distance / reference, prefs.adaptive_curve
+            )
+            cls.adaptive_speed_scale = (
+                prefs.adaptive_min_speed
+                + (1.0 - prefs.adaptive_min_speed) * normalized
+            )
         else:
             cls.adaptive_speed_scale = 1.0
+            cls.adaptive_surface_distance = None
+
+    @classmethod
+    def calculate_fly_speed(cls, prefs):
+        requested_scene_scale = cls.scene_speed_scale if prefs.scene_scale_speed else 1.0
+        if prefs.adaptive_speed:
+            denominator = max(1.0 - prefs.adaptive_min_speed, 0.000001)
+            surface_blend = (
+                cls.adaptive_speed_scale - prefs.adaptive_min_speed
+            ) / denominator
+            surface_blend = max(0.0, min(surface_blend, 1.0))
+            cls.active_scene_scale = (
+                1.0 + (requested_scene_scale - 1.0) * surface_blend
+            )
+        else:
+            cls.active_scene_scale = requested_scene_scale
+        return (
+            prefs.fly_speed
+            * (10.0 ** cls.speed_gear)
+            * cls.active_scene_scale
+            * cls.adaptive_speed_scale
+        )
 
     @classmethod
     def scene_ray_cast(cls, origin, direction, distance):
@@ -1092,6 +1246,11 @@ class GamepadNavigationSession:
         speed_scale = 1.0
         if rb_down and cls.effective_mode == "ORBIT":
             speed_scale *= 3.0
+        cls.fly_look_speed = prefs.fly_look_speed
+        cls.orbit_speed = prefs.orbit_speed
+        cls.pan_speed = prefs.pan_speed
+        cls.zoom_speed = prefs.zoom_speed
+        cls.orbit_boost = rb_down and cls.effective_mode == "ORBIT"
 
         rv3d = cls.rv3d
         rotation = rv3d.view_rotation.copy()
@@ -1127,6 +1286,9 @@ class GamepadNavigationSession:
             distance = max(rv3d.view_distance, 0.001)
             cls.height_locked = rb_down
             cls.show_hud = prefs.show_hud
+            cls.show_control_hud = prefs.show_control_hud
+            cls.horizon_active = prefs.horizon_stabilization
+            cls.clipping_active = prefs.dynamic_clipping
             cls.update_adaptive_speed(prefs, now, rotation)
 
             target_look = Vector((rx, ry))
@@ -1172,13 +1334,7 @@ class GamepadNavigationSession:
                 cls.fly_velocity, target_velocity, movement_response, dt
             )
 
-            scene_scale = cls.scene_speed_scale if prefs.scene_scale_speed else 1.0
-            cls.current_fly_speed = (
-                prefs.fly_speed
-                * (10.0 ** cls.speed_gear)
-                * scene_scale
-                * cls.adaptive_speed_scale
-            )
+            cls.current_fly_speed = cls.calculate_fly_speed(prefs)
 
             if cls.fly_velocity.length > 0.0001:
                 right = rotation @ Vector((1.0, 0.0, 0.0))
@@ -1216,7 +1372,11 @@ class GamepadNavigationSession:
         else:
             cls.height_locked = False
             cls.current_fly_speed = 0.0
+            cls.active_scene_scale = 1.0
             cls.show_hud = prefs.show_hud
+            cls.show_control_hud = prefs.show_control_hud
+            cls.horizon_active = False
+            cls.clipping_active = prefs.dynamic_clipping
             if lx or ly:
                 right = rotation @ Vector((1.0, 0.0, 0.0))
                 up = rotation @ Vector((0.0, 1.0, 0.0))
@@ -1434,30 +1594,6 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
             else:
                 layout.label(text="Waiting for XInput controller", icon="ERROR")
 
-        box = layout.box()
-        box.label(text="Controls")
-        if prefs and prefs.navigation_mode == "FLY":
-            box.label(text="Left stick: Strafe / Forward")
-            box.label(text="Right stick: Look")
-            box.label(text="LT / RT: Down / Up")
-        else:
-            box.label(text="Left stick: Pan")
-            box.label(text="Right stick: Orbit")
-            box.label(text="LT / RT: Zoom out / in")
-        box.label(text="LB tap: Toggle Orbit / Fly")
-        box.label(text="Hold LB: Temporary opposite mode")
-        box.label(text="P1 / P2: Temporary opposite mode")
-        box.label(text="Map rear buttons to L3 / R3")
-        box.label(text="D-pad Up / Down: Speed gear")
-        box.label(text="A / B: Focus / Face target")
-        box.label(text="X / Y: Ground walk / Level horizon")
-        box.label(text="D-pad Left / Right: View history")
-        if prefs and prefs.navigation_mode == "FLY":
-            box.label(text="Hold RB: Lock world height")
-        else:
-            box.label(text="RB: Fast")
-        box.label(text="Back: Stop")
-
         view_box = layout.box()
         view_box.label(text="Views")
         row = view_box.row(align=True)
@@ -1494,6 +1630,10 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
                 layout.prop(prefs, "look_response")
                 layout.prop(prefs, "scene_scale_speed")
                 layout.prop(prefs, "adaptive_speed")
+                if prefs.adaptive_speed:
+                    layout.prop(prefs, "adaptive_start_distance")
+                    layout.prop(prefs, "adaptive_min_speed")
+                    layout.prop(prefs, "adaptive_curve")
                 layout.prop(prefs, "dynamic_clipping")
                 layout.prop(prefs, "horizon_stabilization")
                 if prefs.horizon_stabilization:
@@ -1513,6 +1653,7 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
             layout.prop(prefs, "left_stick_curve")
             layout.prop(prefs, "right_stick_curve")
             layout.prop(prefs, "show_hud")
+            layout.prop(prefs, "show_control_hud")
             layout.prop(prefs, "vibration_feedback")
             if prefs.vibration_feedback:
                 layout.prop(prefs, "vibration_strength")

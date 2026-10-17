@@ -4,6 +4,8 @@ Navigate Blender's 3D viewport with an 8BitDo or other XInput-compatible
 controller while continuing to sculpt, transform objects, and edit mesh
 components.
 
+[中文帮助](docs/README_ZH.md)
+
 The add-on targets Blender 4.5 LTS on Windows and reads controllers directly
 through Windows XInput. It has no third-party Python dependencies.
 
@@ -72,6 +74,65 @@ or zoom. The add-on records a pivot using this priority:
 4. Current viewport focus.
 
 Subsequent Orbit rotation and zoom use that independent pivot.
+
+## Settings
+
+### Fly And Orbit
+
+| Setting | Meaning |
+| --- | --- |
+| Fly Move Speed | Base translation speed in Blender units per second. |
+| Fly Look Speed | Right-stick look speed in radians per second. |
+| Fly Acceleration | How quickly movement approaches the requested speed. |
+| Fly Damping | How quickly residual movement stops after releasing the stick. |
+| Look Response | How quickly right-stick rotation approaches the requested rate. |
+| Orbit Speed | Right-stick Orbit angular speed. |
+| Pan Speed | Orbit pan speed relative to `view_distance`. |
+| Zoom Speed | Exponential Orbit zoom rate. |
+| View Transition | Duration of focus, face, history, bookmark, and horizon animations. |
+
+### Large-scene Speed
+
+`Scene Scale Speed` multiplies Fly speed using the scene-bounds diagonal. It is
+useful when the same controller settings must work in scenes of very different
+sizes.
+
+`Adaptive Surface Speed` casts a ray along the viewing direction and slows Fly
+movement only inside the configured range:
+
+| Setting | Meaning |
+| --- | --- |
+| Adaptive Start Distance | Surface distance, in Blender units, where slowing begins. Lower it to delay slowing until closer to geometry. |
+| Adaptive Minimum Speed | Fraction of base Fly speed retained at the surface. `0.05` means 5%. |
+| Adaptive Curve | Higher values preserve speed longer and concentrate slowing near the surface. |
+
+When both systems are enabled, the scene-scale multiplier fades back to `1x`
+inside the adaptive range. This prevents a very large scene multiplier from
+overpowering close-surface precision.
+
+### Ground And View Assistance
+
+| Setting | Meaning |
+| --- | --- |
+| Dynamic View Clipping | Adapts near/far clipping to scene size and speed, restoring original values on stop. |
+| Horizon Stabilization | Gradually removes sideways camera roll while preserving yaw and pitch/look direction. |
+| Horizon Strength | Rate at which sideways roll is corrected. |
+| Ground Eye Height | Viewpoint height above the detected ground surface. |
+| Maximum Step | Largest upward ground-height change Ground mode can climb in one update. |
+| Ground Probe Distance | Maximum downward search distance for walkable ground. |
+| Maximum Slope | Steepest surface normal accepted as walkable ground. |
+| Collision Avoidance | Prevents Ground mode from moving through forward geometry. |
+| Collision Radius | Clearance retained between the viewpoint and a detected obstacle. |
+
+### Input And Display
+
+Left/right stick deadzones and response curves are independent. A higher curve
+gives finer control around the center while retaining full output at the edge.
+
+`Viewport Status` displays live mode, connection, effective speed, gear,
+scene/adaptive multipliers, detected surface distance, and active assists.
+`Control Help` separately displays the controller mapping in the viewport's
+lower-left corner. Both overlays appear only while navigation is running.
 
 ## Notes
 

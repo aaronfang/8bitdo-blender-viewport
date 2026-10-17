@@ -52,14 +52,18 @@ testing shows conflicts.
 The effective Fly speed is:
 
 ```text
-base speed * scene scale * manual gear * adaptive proximity
+base speed * manual gear * active scene scale * adaptive proximity
 ```
 
 - Manual gears are discrete powers of ten around `1x`.
 - Scene scaling uses a cached scene-bounds diagonal and is recomputed only on
   start or explicit refresh.
-- Adaptive proximity uses a forward ray cast at no more than 10 Hz and clamps
-  its multiplier so a missing or extreme hit cannot stop movement.
+- Adaptive proximity uses a forward ray cast at no more than 10 Hz. Its start
+  distance, minimum multiplier, and curve are configurable. Higher curve values
+  retain more speed until closer to the detected surface.
+- While Adaptive Surface Speed is active, the requested scene multiplier fades
+  toward `1x` as the surface multiplier approaches its minimum. This prevents a
+  large-scene multiplier from overwhelming close-surface precision.
 
 Movement and look commands are filtered with an exponential response whose
 coefficient is derived from elapsed time. This makes acceleration independent
@@ -82,9 +86,10 @@ are serialized into the `.blend` file.
 ## Rendering And Cleanup
 
 The status overlay uses a `SpaceView3D` post-pixel draw handler and Blender's
-font API. It displays only actionable state: mode, speed gear, height/ground
-locks, and controller connection. Draw handlers, timers, and XInput vibration
-must all be removed during stop and unregister.
+font API. The status and control-help sections can be switched independently.
+Status includes mode-specific speed settings, effective Fly speed factors,
+surface distance, active assists, and controller connection. Draw handlers,
+timers, and XInput vibration must all be removed during stop and unregister.
 
 ## Performance Budgets
 

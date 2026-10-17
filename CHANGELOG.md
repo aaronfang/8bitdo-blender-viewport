@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 - 2026-10-17
+
+- Add configurable adaptive start distance, minimum speed, and response curve.
+- Fade Scene Scale Speed to `1x` near surfaces so it cannot override adaptive
+  precision.
+- Expand the viewport HUD with speed factors, surface distance, and assist
+  states.
+- Move controller help from the N Panel to a separately switchable viewport
+  overlay.
+- Add complete parameter documentation and a Chinese help document.
+- Clarify Horizon Stabilization and Maximum Step in tooltips and documentation.
+
 ## 1.3.1 - 2026-10-17
 
 - Rebase Blender's native mouse-navigation focus when gamepad navigation stops.
