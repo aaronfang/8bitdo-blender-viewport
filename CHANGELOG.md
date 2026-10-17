@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0 - 2026-10-17
+
+- Add A-button target focus and B-button target facing.
+- Add interruptible smooth view and Orbit-pivot transitions.
+- Add D-pad Left/Right bidirectional view history.
+- Add named view bookmarks stored in the `.blend` scene.
+- Preserve camera position when facing the active target.
+
 ## 1.1.0 - 2026-10-17
 
 - Add D-pad Fly speed gears from `0.001x` through `1000x`.

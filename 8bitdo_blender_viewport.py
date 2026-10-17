@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -16,18 +16,30 @@ import time
 import bmesh
 import blf
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
+from bpy.props import (
+    BoolProperty,
+    CollectionProperty,
+    EnumProperty,
+    FloatProperty,
+    FloatVectorProperty,
+    IntProperty,
+    StringProperty,
+)
 from mathutils import Quaternion, Vector
 
 
 ADDON_ID = __package__ or __name__
 XINPUT_GAMEPAD_DPAD_UP = 0x0001
 XINPUT_GAMEPAD_DPAD_DOWN = 0x0002
+XINPUT_GAMEPAD_DPAD_LEFT = 0x0004
+XINPUT_GAMEPAD_DPAD_RIGHT = 0x0008
 XINPUT_GAMEPAD_BACK = 0x0020
 XINPUT_GAMEPAD_LEFT_THUMB = 0x0040
 XINPUT_GAMEPAD_RIGHT_THUMB = 0x0080
 XINPUT_GAMEPAD_LEFT_SHOULDER = 0x0100
 XINPUT_GAMEPAD_RIGHT_SHOULDER = 0x0200
+XINPUT_GAMEPAD_A = 0x1000
+XINPUT_GAMEPAD_B = 0x2000
 TEMPORARY_MODE_BUTTONS = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB
 LB_TAP_SECONDS = 0.25
 
@@ -113,6 +125,20 @@ def draw_gamepad_status():
     blf.size(font_id, 14.0)
     blf.color(font_id, 0.92, 0.95, 1.0, 0.9)
     blf.draw(font_id, status)
+
+
+class GamepadViewBookmark(bpy.types.PropertyGroup):
+    name: StringProperty(name="Name", default="View")
+    view_location: FloatVectorProperty(size=3, subtype="XYZ")
+    view_rotation: FloatVectorProperty(size=4, subtype="QUATERNION")
+    view_distance: FloatProperty(default=10.0, min=0.001)
+    orbit_pivot: FloatVectorProperty(size=3, subtype="XYZ")
+    orbit_pivot_valid: BoolProperty(default=False)
+    navigation_mode: EnumProperty(
+        items=(("ORBIT", "Orbit", ""), ("FLY", "Fly", "")),
+        default="FLY",
+    )
+    speed_gear: IntProperty(default=0, min=-3, max=3)
 
 
 class GamepadNavigationPreferences(bpy.types.AddonPreferences):
@@ -239,6 +265,14 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         description="Show navigation mode and speed in the viewport",
         default=True,
     )
+    transition_duration: FloatProperty(
+        name="View Transition",
+        description="Duration of focus, facing, history, and bookmark transitions",
+        default=0.25,
+        min=0.0,
+        max=2.0,
+        subtype="TIME",
+    )
     invert_orbit_y: BoolProperty(name="Invert Right Stick Y", default=False)
     invert_pan_y: BoolProperty(name="Invert Left Stick Y", default=False)
 
@@ -263,6 +297,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "scene_scale_speed")
         layout.prop(self, "adaptive_speed")
         layout.prop(self, "show_hud")
+        layout.prop(self, "transition_duration")
         layout.prop(self, "invert_orbit_y")
         layout.prop(self, "invert_pan_y")
 
@@ -292,6 +327,12 @@ class GamepadNavigationSession:
     height_locked = False
     show_hud = True
     draw_handler = None
+    history_back = []
+    history_forward = []
+    transition_start = None
+    transition_end = None
+    transition_start_time = 0.0
+    transition_duration = 0.0
 
     @classmethod
     def start(cls, context):
@@ -316,6 +357,10 @@ class GamepadNavigationSession:
         cls.current_fly_speed = 0.0
         cls.height_locked = False
         cls.show_hud = addon.preferences.show_hud if addon else True
+        cls.history_back = []
+        cls.history_forward = []
+        cls.transition_start = None
+        cls.transition_end = None
         cls.active = True
         if cls.draw_handler is None:
             cls.draw_handler = bpy.types.SpaceView3D.draw_handler_add(
@@ -339,9 +384,150 @@ class GamepadNavigationSession:
         cls.area = None
         cls.rv3d = None
         cls.orbit_pivot = None
+        cls.transition_start = None
+        cls.transition_end = None
         if cls.draw_handler is not None:
             bpy.types.SpaceView3D.draw_handler_remove(cls.draw_handler, "WINDOW")
             cls.draw_handler = None
+
+    @classmethod
+    def capture_view_state(cls):
+        if cls.rv3d is None:
+            return None
+        addon = bpy.context.preferences.addons.get(ADDON_ID)
+        mode = addon.preferences.navigation_mode if addon else cls.effective_mode
+        return {
+            "view_location": cls.rv3d.view_location.copy(),
+            "view_rotation": cls.rv3d.view_rotation.copy(),
+            "view_distance": float(cls.rv3d.view_distance),
+            "orbit_pivot": cls.orbit_pivot.copy() if cls.orbit_pivot is not None else None,
+            "navigation_mode": mode,
+            "speed_gear": cls.speed_gear,
+        }
+
+    @classmethod
+    def apply_view_state(cls, state):
+        if state is None or cls.rv3d is None:
+            return
+        cls.rv3d.view_location = state["view_location"].copy()
+        cls.rv3d.view_rotation = state["view_rotation"].copy()
+        cls.rv3d.view_distance = state["view_distance"]
+        pivot = state.get("orbit_pivot")
+        cls.orbit_pivot = pivot.copy() if pivot is not None else None
+        cls.speed_gear = state.get("speed_gear", cls.speed_gear)
+        addon = bpy.context.preferences.addons.get(ADDON_ID)
+        if addon is not None:
+            addon.preferences.navigation_mode = state.get(
+                "navigation_mode", addon.preferences.navigation_mode
+            )
+
+    @classmethod
+    def push_history(cls):
+        state = cls.capture_view_state()
+        if state is None:
+            return
+        cls.history_back.append(state)
+        del cls.history_back[:-32]
+        cls.history_forward.clear()
+
+    @classmethod
+    def begin_transition(cls, target, duration, record_history=True):
+        current = cls.capture_view_state()
+        if current is None or target is None:
+            return False
+        if record_history:
+            cls.history_back.append(current)
+            del cls.history_back[:-32]
+            cls.history_forward.clear()
+        if duration <= 0.0:
+            cls.apply_view_state(target)
+            return True
+        cls.transition_start = current
+        cls.transition_end = target
+        cls.transition_start_time = time.perf_counter()
+        cls.transition_duration = duration
+        return True
+
+    @classmethod
+    def update_transition(cls, now):
+        if cls.transition_end is None:
+            return False
+        factor = min(
+            max((now - cls.transition_start_time) / cls.transition_duration, 0.0),
+            1.0,
+        )
+        eased = factor * factor * (3.0 - 2.0 * factor)
+        start = cls.transition_start
+        end = cls.transition_end
+        cls.rv3d.view_location = start["view_location"].lerp(
+            end["view_location"], eased
+        )
+        cls.rv3d.view_rotation = start["view_rotation"].slerp(
+            end["view_rotation"], eased
+        )
+        cls.rv3d.view_distance = (
+            start["view_distance"]
+            + (end["view_distance"] - start["view_distance"]) * eased
+        )
+        start_pivot = start.get("orbit_pivot")
+        end_pivot = end.get("orbit_pivot")
+        if start_pivot is None:
+            start_pivot = start["view_location"]
+        if end_pivot is None:
+            end_pivot = end["view_location"]
+        cls.orbit_pivot = start_pivot.lerp(end_pivot, eased)
+        if factor >= 1.0:
+            cls.apply_view_state(end)
+            cls.transition_start = None
+            cls.transition_end = None
+        return True
+
+    @classmethod
+    def cancel_transition(cls):
+        cls.transition_start = None
+        cls.transition_end = None
+
+    @classmethod
+    def focus_target(cls, duration):
+        target_point = cls.orbit_focus()
+        target = cls.capture_view_state()
+        if target is None:
+            return False
+        target["view_location"] = target_point.copy()
+        target["orbit_pivot"] = target_point.copy()
+        return cls.begin_transition(target, duration)
+
+    @classmethod
+    def face_target(cls, duration):
+        target_point = cls.orbit_focus()
+        target = cls.capture_view_state()
+        if target is None:
+            return False
+        camera_position = cls.camera_position()
+        direction = target_point - camera_position
+        if direction.length <= 0.000001:
+            return False
+        rotation = direction.normalized().to_track_quat("-Z", "Y")
+        distance = max(cls.rv3d.view_distance, 0.001)
+        target["view_rotation"] = rotation
+        target["view_location"] = (
+            camera_position - rotation @ Vector((0.0, 0.0, distance))
+        )
+        target["orbit_pivot"] = target_point.copy()
+        return cls.begin_transition(target, duration)
+
+    @classmethod
+    def navigate_history(cls, direction, duration):
+        source = cls.history_back if direction < 0 else cls.history_forward
+        destination = cls.history_forward if direction < 0 else cls.history_back
+        if not source:
+            return False
+        current = cls.capture_view_state()
+        target = source.pop()
+        if current is not None:
+            destination.append(current)
+            del destination[:-32]
+        return cls.begin_transition(target, duration, record_history=False)
 
     @classmethod
     def calculate_scene_speed_scale(cls):
@@ -597,6 +783,23 @@ class GamepadNavigationSession:
         rv3d = cls.rv3d
         rotation = rv3d.view_rotation.copy()
 
+        manual_input = max(abs(lx), abs(ly), abs(rx), abs(ry), lt, rt) > 0.01
+        if manual_input:
+            cls.cancel_transition()
+        else:
+            if cls.button_pressed(buttons, XINPUT_GAMEPAD_A):
+                cls.focus_target(prefs.transition_duration)
+            elif cls.button_pressed(buttons, XINPUT_GAMEPAD_B):
+                cls.face_target(prefs.transition_duration)
+            elif cls.button_pressed(buttons, XINPUT_GAMEPAD_DPAD_LEFT):
+                cls.navigate_history(-1, prefs.transition_duration)
+            elif cls.button_pressed(buttons, XINPUT_GAMEPAD_DPAD_RIGHT):
+                cls.navigate_history(1, prefs.transition_duration)
+
+        if cls.update_transition(now):
+            cls.previous_buttons = buttons
+            return 0.01
+
         if cls.effective_mode == "FLY":
             distance = max(rv3d.view_distance, 0.001)
             cls.height_locked = rb_down
@@ -735,6 +938,113 @@ class VIEW3D_OT_gamepad_navigation(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class VIEW3D_OT_gamepad_view_action(bpy.types.Operator):
+    bl_idname = "view3d.gamepad_view_action"
+    bl_label = "Gamepad View Action"
+    bl_options = {"REGISTER"}
+
+    action: EnumProperty(
+        items=(
+            ("FOCUS", "Focus", "Center the active navigation target"),
+            ("FACE", "Face", "Turn toward the active navigation target"),
+            ("BACK", "Previous", "Return to the previous view"),
+            ("FORWARD", "Next", "Advance to the next view"),
+        )
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return GamepadNavigationSession.active
+
+    def execute(self, context):
+        session = GamepadNavigationSession
+        prefs = context.preferences.addons[ADDON_ID].preferences
+        if self.action == "FOCUS":
+            changed = session.focus_target(prefs.transition_duration)
+        elif self.action == "FACE":
+            changed = session.face_target(prefs.transition_duration)
+        elif self.action == "BACK":
+            changed = session.navigate_history(-1, prefs.transition_duration)
+        else:
+            changed = session.navigate_history(1, prefs.transition_duration)
+        return {"FINISHED"} if changed else {"CANCELLED"}
+
+
+class VIEW3D_OT_gamepad_bookmark_save(bpy.types.Operator):
+    bl_idname = "view3d.gamepad_bookmark_save"
+    bl_label = "Save View Bookmark"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return GamepadNavigationSession.active
+
+    def execute(self, context):
+        state = GamepadNavigationSession.capture_view_state()
+        if state is None:
+            return {"CANCELLED"}
+        bookmark = context.scene.gamepad_view_bookmarks.add()
+        name = context.scene.gamepad_bookmark_name.strip()
+        bookmark.name = name or f"View {len(context.scene.gamepad_view_bookmarks)}"
+        bookmark.view_location = state["view_location"]
+        bookmark.view_rotation = tuple(state["view_rotation"])
+        bookmark.view_distance = state["view_distance"]
+        pivot = state.get("orbit_pivot")
+        bookmark.orbit_pivot_valid = pivot is not None
+        if pivot is not None:
+            bookmark.orbit_pivot = pivot
+        bookmark.navigation_mode = state["navigation_mode"]
+        bookmark.speed_gear = state["speed_gear"]
+        context.scene.gamepad_bookmark_name = ""
+        return {"FINISHED"}
+
+
+class VIEW3D_OT_gamepad_bookmark_recall(bpy.types.Operator):
+    bl_idname = "view3d.gamepad_bookmark_recall"
+    bl_label = "Recall View Bookmark"
+
+    index: IntProperty()
+
+    @classmethod
+    def poll(cls, context):
+        return GamepadNavigationSession.active
+
+    def execute(self, context):
+        bookmarks = context.scene.gamepad_view_bookmarks
+        if self.index < 0 or self.index >= len(bookmarks):
+            return {"CANCELLED"}
+        bookmark = bookmarks[self.index]
+        pivot = Vector(bookmark.orbit_pivot) if bookmark.orbit_pivot_valid else None
+        state = {
+            "view_location": Vector(bookmark.view_location),
+            "view_rotation": Quaternion(bookmark.view_rotation),
+            "view_distance": bookmark.view_distance,
+            "orbit_pivot": pivot,
+            "navigation_mode": bookmark.navigation_mode,
+            "speed_gear": bookmark.speed_gear,
+        }
+        prefs = context.preferences.addons[ADDON_ID].preferences
+        GamepadNavigationSession.begin_transition(
+            state, prefs.transition_duration, record_history=True
+        )
+        return {"FINISHED"}
+
+
+class VIEW3D_OT_gamepad_bookmark_delete(bpy.types.Operator):
+    bl_idname = "view3d.gamepad_bookmark_delete"
+    bl_label = "Delete View Bookmark"
+    bl_options = {"REGISTER", "UNDO"}
+
+    index: IntProperty()
+
+    def execute(self, context):
+        bookmarks = context.scene.gamepad_view_bookmarks
+        if self.index < 0 or self.index >= len(bookmarks):
+            return {"CANCELLED"}
+        bookmarks.remove(self.index)
+        return {"FINISHED"}
+
+
 class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
     bl_label = "Gamepad Navigation"
     bl_idname = "VIEW3D_PT_gamepad_navigation"
@@ -780,11 +1090,37 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
         box.label(text="P1 / P2: Temporary opposite mode")
         box.label(text="Map rear buttons to L3 / R3")
         box.label(text="D-pad Up / Down: Speed gear")
+        box.label(text="A / B: Focus / Face target")
+        box.label(text="D-pad Left / Right: View history")
         if prefs and prefs.navigation_mode == "FLY":
             box.label(text="Hold RB: Lock world height")
         else:
             box.label(text="RB: Fast")
         box.label(text="Back: Stop")
+
+        view_box = layout.box()
+        view_box.label(text="Views")
+        row = view_box.row(align=True)
+        operator = row.operator("view3d.gamepad_view_action", text="Focus")
+        operator.action = "FOCUS"
+        operator = row.operator("view3d.gamepad_view_action", text="Face")
+        operator.action = "FACE"
+        row = view_box.row(align=True)
+        operator = row.operator("view3d.gamepad_view_action", text="Previous")
+        operator.action = "BACK"
+        operator = row.operator("view3d.gamepad_view_action", text="Next")
+        operator.action = "FORWARD"
+
+        view_box.prop(context.scene, "gamepad_bookmark_name", text="")
+        view_box.operator("view3d.gamepad_bookmark_save", text="Save Bookmark")
+        for index, bookmark in enumerate(context.scene.gamepad_view_bookmarks):
+            row = view_box.row(align=True)
+            operator = row.operator(
+                "view3d.gamepad_bookmark_recall", text=bookmark.name
+            )
+            operator.index = index
+            operator = row.operator("view3d.gamepad_bookmark_delete", text="", icon="X")
+            operator.index = index
 
         if prefs:
             layout.separator()
@@ -812,8 +1148,13 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
 
 
 classes = (
+    GamepadViewBookmark,
     GamepadNavigationPreferences,
     VIEW3D_OT_gamepad_navigation,
+    VIEW3D_OT_gamepad_view_action,
+    VIEW3D_OT_gamepad_bookmark_save,
+    VIEW3D_OT_gamepad_bookmark_recall,
+    VIEW3D_OT_gamepad_bookmark_delete,
     VIEW3D_PT_gamepad_navigation,
 )
 
@@ -824,6 +1165,13 @@ addon_keymaps = []
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+
+    bpy.types.Scene.gamepad_view_bookmarks = CollectionProperty(
+        type=GamepadViewBookmark
+    )
+    bpy.types.Scene.gamepad_bookmark_name = StringProperty(
+        name="Bookmark Name", default=""
+    )
 
     wm = bpy.context.window_manager
     keyconfig = wm.keyconfigs.addon
@@ -843,6 +1191,9 @@ def unregister():
     for keymap, item in addon_keymaps:
         keymap.keymap_items.remove(item)
     addon_keymaps.clear()
+
+    del bpy.types.Scene.gamepad_bookmark_name
+    del bpy.types.Scene.gamepad_view_bookmarks
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

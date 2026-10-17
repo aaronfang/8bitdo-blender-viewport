@@ -1,6 +1,8 @@
 import importlib
 import math
+import os
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,6 +88,76 @@ def test_edit_component_pivot_and_unchanged_view():
     assert rv3d.view_distance == before_distance
 
 
+def test_transition_and_history():
+    session = addon.GamepadNavigationSession
+    rv3d = SimpleNamespace(
+        view_location=Vector((0.0, 0.0, 0.0)),
+        view_distance=10.0,
+        view_rotation=Quaternion((1.0, 0.0, 0.0, 0.0)),
+    )
+    session.rv3d = rv3d
+    session.orbit_pivot = Vector((0.0, 0.0, 0.0))
+    session.history_back = []
+    session.history_forward = []
+    session.effective_mode = "FLY"
+
+    target = session.capture_view_state()
+    target["view_location"] = Vector((10.0, 0.0, 0.0))
+    target["orbit_pivot"] = Vector((10.0, 0.0, 0.0))
+    assert session.begin_transition(target, 1.0)
+    session.transition_start_time = 0.0
+    assert session.update_transition(0.5)
+    assert_close(rv3d.view_location.x, 5.0)
+    assert session.update_transition(1.0)
+    assert_close(rv3d.view_location.x, 10.0)
+    assert session.transition_end is None
+
+    assert session.navigate_history(-1, 0.0)
+    assert_close(rv3d.view_location.x, 0.0)
+    assert session.navigate_history(1, 0.0)
+    assert_close(rv3d.view_location.x, 10.0)
+
+
+def test_face_target_preserves_camera_position():
+    reset_scene()
+    bpy.ops.mesh.primitive_cube_add(location=(5.0, 0.0, 0.0))
+    session = addon.GamepadNavigationSession
+    session.rv3d = SimpleNamespace(
+        view_location=Vector((0.0, 0.0, 0.0)),
+        view_distance=10.0,
+        view_rotation=Quaternion((1.0, 0.0, 0.0, 0.0)),
+    )
+    session.orbit_pivot = None
+    session.effective_mode = "FLY"
+    camera_before = session.camera_position()
+    assert session.face_target(0.0)
+    camera_after = session.camera_position()
+    assert (camera_before - camera_after).length < 1.0e-6
+
+
+def test_bookmark_persistence():
+    bookmark = bpy.context.scene.gamepad_view_bookmarks.add()
+    bookmark.name = "Persistent View"
+    bookmark.view_location = (1.0, 2.0, 3.0)
+    bookmark.view_rotation = (1.0, 0.0, 0.0, 0.0)
+    bookmark.view_distance = 25.0
+    bookmark.navigation_mode = "ORBIT"
+    bookmark.speed_gear = 2
+
+    handle, path = tempfile.mkstemp(suffix=".blend")
+    os.close(handle)
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=path)
+        bpy.ops.wm.open_mainfile(filepath=path)
+        restored = bpy.context.scene.gamepad_view_bookmarks[0]
+        assert restored.name == "Persistent View"
+        assert tuple(restored.view_location) == (1.0, 2.0, 3.0)
+        assert restored.navigation_mode == "ORBIT"
+        assert restored.speed_gear == 2
+    finally:
+        os.unlink(path)
+
+
 def main():
     addon.register()
     try:
@@ -93,6 +165,9 @@ def main():
         test_button_edges()
         test_scene_scale()
         test_edit_component_pivot_and_unchanged_view()
+        test_transition_and_history()
+        test_face_target_preserves_camera_position()
+        test_bookmark_persistence()
     finally:
         addon.unregister()
     print("ALL_TESTS_PASSED")

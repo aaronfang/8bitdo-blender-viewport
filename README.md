@@ -19,6 +19,8 @@ through Windows XInput. It has no third-party Python dependencies.
 - Manual speed gears, independent stick response curves, and smooth Fly input.
 - Optional scene-scale and surface-distance adaptive speed.
 - Compact in-viewport navigation status.
+- Target focus/facing actions with interruptible smooth transitions.
+- Bidirectional view history and `.blend`-persistent named bookmarks.
 
 ## Installation
 
@@ -44,6 +46,8 @@ confirm that it is visible as a game controller.
 | Hold RB | Lock world Z height | 3x navigation speed |
 | Hold L3 or R3 | Temporarily use the opposite mode | Temporarily use the opposite mode |
 | D-pad Up / Down | Increase / decrease speed gear | Increase / decrease speed gear |
+| A / B | Focus / face the active target | Focus / face the active target |
+| D-pad Left / Right | Previous / next view | Previous / next view |
 | Back | Stop gamepad navigation | Stop gamepad navigation |
 
 `Ctrl+Shift+J` toggles gamepad navigation when the mouse is over a 3D
