@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -14,12 +14,15 @@ import sys
 import time
 
 import bmesh
+import blf
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
 from mathutils import Quaternion, Vector
 
 
 ADDON_ID = __package__ or __name__
+XINPUT_GAMEPAD_DPAD_UP = 0x0001
+XINPUT_GAMEPAD_DPAD_DOWN = 0x0002
 XINPUT_GAMEPAD_BACK = 0x0020
 XINPUT_GAMEPAD_LEFT_THUMB = 0x0040
 XINPUT_GAMEPAD_RIGHT_THUMB = 0x0080
@@ -65,12 +68,12 @@ def load_xinput():
 XINPUT = load_xinput()
 
 
-def axis_value(raw, deadzone):
+def axis_value(raw, deadzone, response_curve=1.0):
     value = max(-1.0, min(1.0, raw / 32767.0))
     magnitude = abs(value)
     if magnitude <= deadzone:
         return 0.0
-    scaled = (magnitude - deadzone) / (1.0 - deadzone)
+    scaled = ((magnitude - deadzone) / (1.0 - deadzone)) ** response_curve
     return math.copysign(scaled, value)
 
 
@@ -79,6 +82,37 @@ def trigger_value(raw, threshold):
     if value <= threshold:
         return 0.0
     return (value - threshold) / (1.0 - threshold)
+
+
+def exponential_blend(current, target, response, dt):
+    factor = 1.0 - math.exp(-max(response, 0.001) * max(dt, 0.0))
+    return current + (target - current) * factor
+
+
+def draw_gamepad_status():
+    session = GamepadNavigationSession
+    if not session.active or not session.show_hud:
+        return
+    try:
+        if bpy.context.area != session.area:
+            return
+    except ReferenceError:
+        return
+
+    status = session.effective_mode
+    status += f"  SPEED {10.0 ** session.speed_gear:g}x"
+    if session.effective_mode == "FLY":
+        status += f"  {session.current_fly_speed:.2f} u/s"
+    if session.height_locked:
+        status += "  HEIGHT LOCK"
+    if not session.connected:
+        status += "  CONTROLLER DISCONNECTED"
+
+    font_id = 0
+    blf.position(font_id, 18, 42, 0)
+    blf.size(font_id, 14.0)
+    blf.color(font_id, 0.92, 0.95, 1.0, 0.9)
+    blf.draw(font_id, status)
 
 
 class GamepadNavigationPreferences(bpy.types.AddonPreferences):
@@ -99,12 +133,33 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         min=0,
         max=3,
     )
-    stick_deadzone: FloatProperty(
-        name="Stick Deadzone",
+    left_stick_deadzone: FloatProperty(
+        name="Left Stick Deadzone",
         default=0.16,
         min=0.0,
         max=0.8,
         subtype="FACTOR",
+    )
+    right_stick_deadzone: FloatProperty(
+        name="Right Stick Deadzone",
+        default=0.16,
+        min=0.0,
+        max=0.8,
+        subtype="FACTOR",
+    )
+    left_stick_curve: FloatProperty(
+        name="Left Stick Curve",
+        description="Higher values provide finer control near the stick center",
+        default=1.5,
+        min=0.25,
+        max=4.0,
+    )
+    right_stick_curve: FloatProperty(
+        name="Right Stick Curve",
+        description="Higher values provide finer look control near the stick center",
+        default=1.5,
+        min=0.25,
+        max=4.0,
     )
     trigger_deadzone: FloatProperty(
         name="Trigger Deadzone",
@@ -148,6 +203,42 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         min=0.05,
         max=10.0,
     )
+    fly_acceleration: FloatProperty(
+        name="Fly Acceleration",
+        description="How quickly Fly movement reaches the requested speed",
+        default=10.0,
+        min=0.1,
+        max=50.0,
+    )
+    fly_damping: FloatProperty(
+        name="Fly Damping",
+        description="How quickly Fly movement stops after releasing the stick",
+        default=14.0,
+        min=0.1,
+        max=50.0,
+    )
+    look_response: FloatProperty(
+        name="Look Response",
+        description="How quickly Fly look reaches the requested turn rate",
+        default=18.0,
+        min=0.1,
+        max=50.0,
+    )
+    scene_scale_speed: BoolProperty(
+        name="Scene Scale Speed",
+        description="Scale Fly speed from the cached scene bounds",
+        default=False,
+    )
+    adaptive_speed: BoolProperty(
+        name="Adaptive Surface Speed",
+        description="Slow Fly movement when approaching visible geometry",
+        default=False,
+    )
+    show_hud: BoolProperty(
+        name="Viewport Status",
+        description="Show navigation mode and speed in the viewport",
+        default=True,
+    )
     invert_orbit_y: BoolProperty(name="Invert Right Stick Y", default=False)
     invert_pan_y: BoolProperty(name="Invert Left Stick Y", default=False)
 
@@ -155,7 +246,10 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout = self.layout
         layout.prop(self, "navigation_mode", expand=True)
         layout.prop(self, "controller_index")
-        layout.prop(self, "stick_deadzone")
+        layout.prop(self, "left_stick_deadzone")
+        layout.prop(self, "right_stick_deadzone")
+        layout.prop(self, "left_stick_curve")
+        layout.prop(self, "right_stick_curve")
         layout.prop(self, "trigger_deadzone")
         layout.separator()
         layout.prop(self, "orbit_speed")
@@ -163,6 +257,12 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "zoom_speed")
         layout.prop(self, "fly_speed")
         layout.prop(self, "fly_look_speed")
+        layout.prop(self, "fly_acceleration")
+        layout.prop(self, "fly_damping")
+        layout.prop(self, "look_response")
+        layout.prop(self, "scene_scale_speed")
+        layout.prop(self, "adaptive_speed")
+        layout.prop(self, "show_hud")
         layout.prop(self, "invert_orbit_y")
         layout.prop(self, "invert_pan_y")
 
@@ -181,6 +281,17 @@ class GamepadNavigationSession:
     last_sculpt_location = None
     last_sculpt_object = None
     orbit_pivot = None
+    previous_buttons = 0
+    speed_gear = 0
+    scene_speed_scale = 1.0
+    adaptive_speed_scale = 1.0
+    last_proximity_time = 0.0
+    fly_velocity = Vector((0.0, 0.0, 0.0))
+    look_velocity = Vector((0.0, 0.0))
+    current_fly_speed = 0.0
+    height_locked = False
+    show_hud = True
+    draw_handler = None
 
     @classmethod
     def start(cls, context):
@@ -195,7 +306,21 @@ class GamepadNavigationSession:
         cls.last_sculpt_location = None
         cls.last_sculpt_object = None
         cls.orbit_pivot = None
+        cls.previous_buttons = 0
+        cls.speed_gear = 0
+        cls.scene_speed_scale = cls.calculate_scene_speed_scale()
+        cls.adaptive_speed_scale = 1.0
+        cls.last_proximity_time = 0.0
+        cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+        cls.look_velocity = Vector((0.0, 0.0))
+        cls.current_fly_speed = 0.0
+        cls.height_locked = False
+        cls.show_hud = addon.preferences.show_hud if addon else True
         cls.active = True
+        if cls.draw_handler is None:
+            cls.draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+                draw_gamepad_status, (), "WINDOW", "POST_PIXEL"
+            )
         if not bpy.app.timers.is_registered(gamepad_navigation_timer):
             bpy.app.timers.register(gamepad_navigation_timer, first_interval=0.01)
 
@@ -204,6 +329,9 @@ class GamepadNavigationSession:
         cls.active = False
         cls.connected = False
         cls.lb_was_down = False
+        cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+        cls.look_velocity = Vector((0.0, 0.0))
+        cls.height_locked = False
         try:
             cls.area.tag_redraw()
         except (AttributeError, ReferenceError):
@@ -211,6 +339,67 @@ class GamepadNavigationSession:
         cls.area = None
         cls.rv3d = None
         cls.orbit_pivot = None
+        if cls.draw_handler is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(cls.draw_handler, "WINDOW")
+            cls.draw_handler = None
+
+    @classmethod
+    def calculate_scene_speed_scale(cls):
+        minimum = Vector((math.inf, math.inf, math.inf))
+        maximum = Vector((-math.inf, -math.inf, -math.inf))
+        found = False
+        for obj in bpy.context.scene.objects:
+            try:
+                for corner in obj.bound_box:
+                    point = obj.matrix_world @ Vector(corner)
+                    minimum.x = min(minimum.x, point.x)
+                    minimum.y = min(minimum.y, point.y)
+                    minimum.z = min(minimum.z, point.z)
+                    maximum.x = max(maximum.x, point.x)
+                    maximum.y = max(maximum.y, point.y)
+                    maximum.z = max(maximum.z, point.z)
+                    found = True
+            except (AttributeError, ReferenceError, TypeError):
+                continue
+        if not found:
+            return 1.0
+        diagonal = (maximum - minimum).length
+        return max(0.01, min(diagonal / 100.0, 1000.0))
+
+    @classmethod
+    def update_adaptive_speed(cls, prefs, now, rotation):
+        if not prefs.adaptive_speed:
+            cls.adaptive_speed_scale = 1.0
+            return
+        if now - cls.last_proximity_time < 0.1:
+            return
+        cls.last_proximity_time = now
+
+        origin = cls.camera_position(rotation)
+        direction = rotation @ Vector((0.0, 0.0, -1.0))
+        reference = max(cls.scene_speed_scale * 100.0 * 0.02, 0.1)
+        try:
+            hit, _location, _normal, _index, _object, _matrix = (
+                bpy.context.scene.ray_cast(
+                    bpy.context.evaluated_depsgraph_get(),
+                    origin,
+                    direction,
+                    distance=reference,
+                )
+            )
+        except (AttributeError, ReferenceError, RuntimeError, TypeError):
+            hit = False
+            _location = None
+
+        if hit:
+            distance = (Vector(_location) - origin).length
+            cls.adaptive_speed_scale = max(0.05, min(distance / reference, 1.0))
+        else:
+            cls.adaptive_speed_scale = 1.0
+
+    @classmethod
+    def button_pressed(cls, buttons, mask):
+        return bool(buttons & mask) and not bool(cls.previous_buttons & mask)
 
     @classmethod
     def capture_sculpt_location(cls):
@@ -338,11 +527,13 @@ class GamepadNavigationSession:
         if not cls.connected:
             cls.last_time = time.perf_counter()
             cls.lb_was_down = False
+            cls.previous_buttons = 0
             cls.effective_mode = prefs.navigation_mode
             return 0.05
 
         gamepad = state.Gamepad
-        if gamepad.wButtons & XINPUT_GAMEPAD_BACK:
+        buttons = gamepad.wButtons
+        if buttons & XINPUT_GAMEPAD_BACK:
             cls.stop()
             return None
 
@@ -350,10 +541,18 @@ class GamepadNavigationSession:
         dt = min(now - cls.last_time, 0.05)
         cls.last_time = now
 
-        lx = axis_value(gamepad.sThumbLX, prefs.stick_deadzone)
-        ly = axis_value(gamepad.sThumbLY, prefs.stick_deadzone)
-        rx = axis_value(gamepad.sThumbRX, prefs.stick_deadzone)
-        ry = axis_value(gamepad.sThumbRY, prefs.stick_deadzone)
+        lx = axis_value(
+            gamepad.sThumbLX, prefs.left_stick_deadzone, prefs.left_stick_curve
+        )
+        ly = axis_value(
+            gamepad.sThumbLY, prefs.left_stick_deadzone, prefs.left_stick_curve
+        )
+        rx = axis_value(
+            gamepad.sThumbRX, prefs.right_stick_deadzone, prefs.right_stick_curve
+        )
+        ry = axis_value(
+            gamepad.sThumbRY, prefs.right_stick_deadzone, prefs.right_stick_curve
+        )
         lt = trigger_value(gamepad.bLeftTrigger, prefs.trigger_deadzone)
         rt = trigger_value(gamepad.bRightTrigger, prefs.trigger_deadzone)
 
@@ -362,7 +561,12 @@ class GamepadNavigationSession:
         if prefs.invert_orbit_y:
             ry = -ry
 
-        lb_down = bool(gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER)
+        if cls.button_pressed(buttons, XINPUT_GAMEPAD_DPAD_UP):
+            cls.speed_gear = min(cls.speed_gear + 1, 3)
+        if cls.button_pressed(buttons, XINPUT_GAMEPAD_DPAD_DOWN):
+            cls.speed_gear = max(cls.speed_gear - 1, -3)
+
+        lb_down = bool(buttons & XINPUT_GAMEPAD_LEFT_SHOULDER)
         if lb_down and not cls.lb_was_down:
             cls.lb_press_time = now
         elif not lb_down and cls.lb_was_down:
@@ -373,17 +577,19 @@ class GamepadNavigationSession:
         cls.lb_was_down = lb_down
 
         previous_mode = cls.effective_mode
-        temporary_mode = lb_down or bool(gamepad.wButtons & TEMPORARY_MODE_BUTTONS)
+        temporary_mode = lb_down or bool(buttons & TEMPORARY_MODE_BUTTONS)
         cls.effective_mode = prefs.navigation_mode
         if temporary_mode:
             cls.effective_mode = "FLY" if prefs.navigation_mode == "ORBIT" else "ORBIT"
 
         if previous_mode != "ORBIT" and cls.effective_mode == "ORBIT":
             cls.focus_orbit_view()
+            cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+            cls.look_velocity = Vector((0.0, 0.0))
         elif cls.effective_mode == "ORBIT" and cls.orbit_pivot is None:
             cls.focus_orbit_view()
 
-        rb_down = bool(gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER)
+        rb_down = bool(buttons & XINPUT_GAMEPAD_RIGHT_SHOULDER)
         speed_scale = 1.0
         if rb_down and cls.effective_mode == "ORBIT":
             speed_scale *= 3.0
@@ -393,20 +599,29 @@ class GamepadNavigationSession:
 
         if cls.effective_mode == "FLY":
             distance = max(rv3d.view_distance, 0.001)
+            cls.height_locked = rb_down
+            cls.show_hud = prefs.show_hud
+            cls.update_adaptive_speed(prefs, now, rotation)
 
-            if rx or ry:
+            target_look = Vector((rx, ry))
+            cls.look_velocity = exponential_blend(
+                cls.look_velocity, target_look, prefs.look_response, dt
+            )
+            smooth_rx, smooth_ry = cls.look_velocity
+
+            if abs(smooth_rx) > 0.0001 or abs(smooth_ry) > 0.0001:
                 camera_position = (
                     rv3d.view_location
                     + rotation @ Vector((0.0, 0.0, distance))
                 )
                 yaw = Quaternion(
                     (0.0, 0.0, 1.0),
-                    -rx * prefs.fly_look_speed * dt * speed_scale,
+                    -smooth_rx * prefs.fly_look_speed * dt,
                 )
                 pitch_axis = rotation @ Vector((1.0, 0.0, 0.0))
                 pitch = Quaternion(
                     pitch_axis,
-                    ry * prefs.fly_look_speed * dt * speed_scale,
+                    smooth_ry * prefs.fly_look_speed * dt,
                 )
                 rotation = (pitch @ yaw @ rotation).normalized()
                 rv3d.view_rotation = rotation
@@ -416,14 +631,41 @@ class GamepadNavigationSession:
                 )
 
             vertical = rt - lt
-            if lx or ly or vertical:
+            target_velocity = Vector((lx, ly, vertical))
+            if rb_down:
+                target_velocity.z = 0.0
+            movement_response = (
+                prefs.fly_acceleration
+                if target_velocity.length > cls.fly_velocity.length
+                else prefs.fly_damping
+            )
+            cls.fly_velocity = exponential_blend(
+                cls.fly_velocity, target_velocity, movement_response, dt
+            )
+
+            scene_scale = cls.scene_speed_scale if prefs.scene_scale_speed else 1.0
+            cls.current_fly_speed = (
+                prefs.fly_speed
+                * (10.0 ** cls.speed_gear)
+                * scene_scale
+                * cls.adaptive_speed_scale
+            )
+
+            if cls.fly_velocity.length > 0.0001:
                 right = rotation @ Vector((1.0, 0.0, 0.0))
                 forward = rotation @ Vector((0.0, 0.0, -1.0))
-                movement = right * lx + forward * ly + Vector((0.0, 0.0, vertical))
+                movement = (
+                    right * cls.fly_velocity.x
+                    + forward * cls.fly_velocity.y
+                    + Vector((0.0, 0.0, cls.fly_velocity.z))
+                )
                 if rb_down:
                     movement.z = 0.0
-                rv3d.view_location += movement * prefs.fly_speed * dt * speed_scale
+                rv3d.view_location += movement * cls.current_fly_speed * dt
         else:
+            cls.height_locked = False
+            cls.current_fly_speed = 0.0
+            cls.show_hud = prefs.show_hud
             if lx or ly:
                 right = rotation @ Vector((1.0, 0.0, 0.0))
                 up = rotation @ Vector((0.0, 1.0, 0.0))
@@ -456,6 +698,7 @@ class GamepadNavigationSession:
                 )
                 cls.set_camera_transform(camera_position, rv3d.view_rotation.copy())
 
+        cls.previous_buttons = buttons
         return 0.01
 
 
@@ -536,6 +779,7 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
         box.label(text="Hold LB: Temporary opposite mode")
         box.label(text="P1 / P2: Temporary opposite mode")
         box.label(text="Map rear buttons to L3 / R3")
+        box.label(text="D-pad Up / Down: Speed gear")
         if prefs and prefs.navigation_mode == "FLY":
             box.label(text="Hold RB: Lock world height")
         else:
@@ -549,9 +793,19 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
             if prefs.navigation_mode == "FLY":
                 layout.prop(prefs, "fly_speed")
                 layout.prop(prefs, "fly_look_speed")
+                layout.prop(prefs, "fly_acceleration")
+                layout.prop(prefs, "fly_damping")
+                layout.prop(prefs, "look_response")
+                layout.prop(prefs, "scene_scale_speed")
+                layout.prop(prefs, "adaptive_speed")
             else:
                 layout.prop(prefs, "pan_speed")
                 layout.prop(prefs, "zoom_speed")
+            layout.prop(prefs, "left_stick_deadzone")
+            layout.prop(prefs, "right_stick_deadzone")
+            layout.prop(prefs, "left_stick_curve")
+            layout.prop(prefs, "right_stick_curve")
+            layout.prop(prefs, "show_hud")
             layout.prop(prefs, "invert_orbit_y")
             if prefs.navigation_mode == "ORBIT":
                 layout.prop(prefs, "invert_pan_y")

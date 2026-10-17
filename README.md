@@ -16,6 +16,9 @@ through Windows XInput. It has no third-party Python dependencies.
 - Independent Fly movement and look speeds.
 - World-height lock for level flight.
 - Controller deadzones, axis inversion, and precision/fast controls.
+- Manual speed gears, independent stick response curves, and smooth Fly input.
+- Optional scene-scale and surface-distance adaptive speed.
+- Compact in-viewport navigation status.
 
 ## Installation
 
@@ -40,6 +43,7 @@ confirm that it is visible as a game controller.
 | Hold LB | Temporarily use Orbit | Temporarily use Fly |
 | Hold RB | Lock world Z height | 3x navigation speed |
 | Hold L3 or R3 | Temporarily use the opposite mode | Temporarily use the opposite mode |
+| D-pad Up / Down | Increase / decrease speed gear | Increase / decrease speed gear |
 | Back | Stop gamepad navigation | Stop gamepad navigation |
 
 `Ctrl+Shift+J` toggles gamepad navigation when the mouse is over a 3D
@@ -72,3 +76,11 @@ Subsequent Orbit rotation and zoom use that independent pivot.
 ## License
 
 [MIT](LICENSE)
+
+## Development
+
+Run the smoke tests with Blender 4.5:
+
+```powershell
+blender.exe --background --factory-startup --python tests/blender_smoke_test.py
+```
