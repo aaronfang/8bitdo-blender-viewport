@@ -158,6 +158,72 @@ def test_bookmark_persistence():
         os.unlink(path)
 
 
+def test_horizon_level_preserves_forward_direction():
+    forward = Vector((1.0, 0.2, -0.3)).normalized()
+    base = forward.to_track_quat("-Z", "Y")
+    rolled = Quaternion(forward, 0.7) @ base
+    leveled = addon.GamepadNavigationSession.leveled_rotation(rolled)
+    leveled_forward = leveled @ Vector((0.0, 0.0, -1.0))
+    assert (leveled_forward - forward).length < 1.0e-6
+    leveled_right = leveled @ Vector((1.0, 0.0, 0.0))
+    assert abs(leveled_right.z) < 1.0e-6
+
+
+def test_ground_walk_and_dynamic_clipping():
+    reset_scene()
+    bpy.ops.mesh.primitive_plane_add(size=20.0, location=(0.0, 0.0, 0.0))
+    bpy.context.view_layer.update()
+    session = addon.GamepadNavigationSession
+    ground_prefs = SimpleNamespace(
+        collision_avoidance=False,
+        collision_radius=0.3,
+        ground_eye_height=1.7,
+        ground_step_height=0.5,
+        ground_probe_distance=10.0,
+        ground_slope_angle=math.radians(50.0),
+    )
+    result = session.apply_ground_walk(
+        Vector((0.0, 0.0, 5.0)),
+        Vector((1.0, 0.0, 0.0)),
+        ground_prefs,
+        1.0,
+    )
+    assert_close(result.x, 1.0)
+    assert_close(result.z, 1.7)
+
+    bpy.ops.mesh.primitive_plane_add(
+        size=10.0,
+        location=(1.0, 0.0, 2.0),
+        rotation=(0.0, math.radians(90.0), 0.0),
+    )
+    bpy.context.view_layer.update()
+    ground_prefs.collision_avoidance = True
+    ground_prefs.vibration_feedback = False
+    ground_prefs.vibration_strength = 0.0
+    result = session.apply_ground_walk(
+        Vector((0.0, 0.0, 1.7)),
+        Vector((2.0, 0.0, 0.0)),
+        ground_prefs,
+        1.0,
+    )
+    assert_close(result.x, 0.7)
+    assert_close(result.z, 1.7)
+
+    session.space = SimpleNamespace(clip_start=0.1, clip_end=1000.0)
+    session.original_clip_start = 0.1
+    session.original_clip_end = 1000.0
+    session.scene_diagonal = 10000.0
+    session.current_fly_speed = 100.0
+    session.last_clip_time = 0.0
+    session.update_dynamic_clipping(SimpleNamespace(dynamic_clipping=True), 1.0)
+    assert_close(session.space.clip_start, 0.1)
+    assert_close(session.space.clip_end, 40000.0)
+    session.update_dynamic_clipping(SimpleNamespace(dynamic_clipping=False), 1.1)
+    assert_close(session.space.clip_start, 0.1)
+    assert_close(session.space.clip_end, 1000.0)
+    session.space = None
+
+
 def main():
     addon.register()
     try:
@@ -168,6 +234,8 @@ def main():
         test_transition_and_history()
         test_face_target_preserves_camera_position()
         test_bookmark_persistence()
+        test_horizon_level_preserves_forward_direction()
+        test_ground_walk_and_dynamic_clipping()
     finally:
         addon.unregister()
     print("ALL_TESTS_PASSED")

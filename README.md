@@ -21,6 +21,9 @@ through Windows XInput. It has no third-party Python dependencies.
 - Compact in-viewport navigation status.
 - Target focus/facing actions with interruptible smooth transitions.
 - Bidirectional view history and `.blend`-persistent named bookmarks.
+- Optional dynamic viewport clipping and horizon stabilization.
+- Ground-walk navigation with slope, step, and collision controls.
+- Optional XInput vibration feedback.
 
 ## Installation
 
@@ -47,6 +50,7 @@ confirm that it is visible as a game controller.
 | Hold L3 or R3 | Temporarily use the opposite mode | Temporarily use the opposite mode |
 | D-pad Up / Down | Increase / decrease speed gear | Increase / decrease speed gear |
 | A / B | Focus / face the active target | Focus / face the active target |
+| X / Y | Toggle Ground mode / level horizon | Toggle Ground mode / level horizon |
 | D-pad Left / Right | Previous / next view | Previous / next view |
 | Back | Stop gamepad navigation | Stop gamepad navigation |
 
@@ -72,6 +76,9 @@ Subsequent Orbit rotation and zoom use that independent pivot.
 ## Notes
 
 - The add-on controls the viewport, not scene cameras or objects.
+- Ground mode uses world Z as up and follows ray-castable scene geometry.
+- Dynamic clipping restores the viewport's original clipping values when
+  navigation stops.
 - XInput supports up to four controllers; choose index `0` through `3` in the
   panel.
 - If no controller is detected, switch the controller to XInput/X mode and

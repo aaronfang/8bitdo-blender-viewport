@@ -3,7 +3,7 @@
 The public `v1.0.0` release is the stable baseline. Large-scene improvements
 will be delivered as independently testable releases.
 
-## v1.1 - Control Foundation
+## v1.1 - Control Foundation (Delivered)
 
 - Manual speed gears controlled by D-pad Up/Down.
 - Optional scene-scale-aware base Fly speed.
@@ -20,7 +20,7 @@ Acceptance criteria:
 - Expensive scene queries run at no more than 10 Hz.
 - Blender 4.5.5 can register/unregister the add-on without errors.
 
-## v1.2 - Targeting And Recovery
+## v1.2 - Targeting And Recovery (Delivered)
 
 - One-action focus using the existing pivot priority.
 - Face target without moving the current viewpoint.
@@ -35,7 +35,7 @@ Acceptance criteria:
 - View transitions are interruptible and frame-rate independent.
 - Bookmark data survives saving and reopening a `.blend` file.
 
-## v1.3 - Environment Assistance
+## v1.3 - Environment Assistance (Delivered)
 
 - Optional dynamic near/far viewport clipping.
 - Horizon leveling and optional gradual horizon stabilization.

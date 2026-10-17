@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -40,6 +40,8 @@ XINPUT_GAMEPAD_LEFT_SHOULDER = 0x0100
 XINPUT_GAMEPAD_RIGHT_SHOULDER = 0x0200
 XINPUT_GAMEPAD_A = 0x1000
 XINPUT_GAMEPAD_B = 0x2000
+XINPUT_GAMEPAD_X = 0x4000
+XINPUT_GAMEPAD_Y = 0x8000
 TEMPORARY_MODE_BUTTONS = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB
 LB_TAP_SECONDS = 0.25
 
@@ -63,6 +65,13 @@ class XINPUT_STATE(ctypes.Structure):
     ]
 
 
+class XINPUT_VIBRATION(ctypes.Structure):
+    _fields_ = [
+        ("wLeftMotorSpeed", ctypes.c_ushort),
+        ("wRightMotorSpeed", ctypes.c_ushort),
+    ]
+
+
 def load_xinput():
     if sys.platform != "win32":
         return None
@@ -71,6 +80,12 @@ def load_xinput():
             dll = ctypes.WinDLL(dll_name)
             dll.XInputGetState.argtypes = [ctypes.c_ulong, ctypes.POINTER(XINPUT_STATE)]
             dll.XInputGetState.restype = ctypes.c_ulong
+            if hasattr(dll, "XInputSetState"):
+                dll.XInputSetState.argtypes = [
+                    ctypes.c_ulong,
+                    ctypes.POINTER(XINPUT_VIBRATION),
+                ]
+                dll.XInputSetState.restype = ctypes.c_ulong
             return dll
         except OSError:
             continue
@@ -117,6 +132,8 @@ def draw_gamepad_status():
         status += f"  {session.current_fly_speed:.2f} u/s"
     if session.height_locked:
         status += "  HEIGHT LOCK"
+    if session.ground_walk:
+        status += "  GROUND"
     if not session.connected:
         status += "  CONTROLLER DISCONNECTED"
 
@@ -273,6 +290,76 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         max=2.0,
         subtype="TIME",
     )
+    dynamic_clipping: BoolProperty(
+        name="Dynamic View Clipping",
+        description="Adapt viewport clipping to scene scale and navigation speed",
+        default=False,
+    )
+    horizon_stabilization: BoolProperty(
+        name="Horizon Stabilization",
+        description="Gradually remove view roll while flying",
+        default=False,
+    )
+    horizon_strength: FloatProperty(
+        name="Horizon Strength",
+        default=3.0,
+        min=0.1,
+        max=20.0,
+    )
+    ground_eye_height: FloatProperty(
+        name="Ground Eye Height",
+        description="Viewpoint height above walkable ground",
+        default=1.7,
+        min=0.01,
+        max=1000.0,
+        subtype="DISTANCE",
+    )
+    ground_step_height: FloatProperty(
+        name="Maximum Step",
+        default=0.5,
+        min=0.0,
+        max=100.0,
+        subtype="DISTANCE",
+    )
+    ground_probe_distance: FloatProperty(
+        name="Ground Probe Distance",
+        description="Maximum distance below the viewpoint used to find walkable ground",
+        default=10.0,
+        min=0.1,
+        max=100000.0,
+        subtype="DISTANCE",
+    )
+    ground_slope_angle: FloatProperty(
+        name="Maximum Slope",
+        default=math.radians(50.0),
+        min=0.0,
+        max=math.radians(89.0),
+        subtype="ANGLE",
+    )
+    collision_avoidance: BoolProperty(
+        name="Collision Avoidance",
+        description="Prevent the viewpoint from moving through geometry in Ground mode",
+        default=True,
+    )
+    collision_radius: FloatProperty(
+        name="Collision Radius",
+        default=0.3,
+        min=0.01,
+        max=100.0,
+        subtype="DISTANCE",
+    )
+    vibration_feedback: BoolProperty(
+        name="Vibration Feedback",
+        description="Use XInput vibration for mode, speed, ground, and collision events",
+        default=False,
+    )
+    vibration_strength: FloatProperty(
+        name="Vibration Strength",
+        default=0.35,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
     invert_orbit_y: BoolProperty(name="Invert Right Stick Y", default=False)
     invert_pan_y: BoolProperty(name="Invert Left Stick Y", default=False)
 
@@ -298,6 +385,17 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "adaptive_speed")
         layout.prop(self, "show_hud")
         layout.prop(self, "transition_duration")
+        layout.prop(self, "dynamic_clipping")
+        layout.prop(self, "horizon_stabilization")
+        layout.prop(self, "horizon_strength")
+        layout.prop(self, "ground_eye_height")
+        layout.prop(self, "ground_step_height")
+        layout.prop(self, "ground_probe_distance")
+        layout.prop(self, "ground_slope_angle")
+        layout.prop(self, "collision_avoidance")
+        layout.prop(self, "collision_radius")
+        layout.prop(self, "vibration_feedback")
+        layout.prop(self, "vibration_strength")
         layout.prop(self, "invert_orbit_y")
         layout.prop(self, "invert_pan_y")
 
@@ -308,6 +406,7 @@ class GamepadNavigationSession:
     active = False
     connected = False
     area = None
+    space = None
     rv3d = None
     last_time = 0.0
     lb_was_down = False
@@ -333,11 +432,21 @@ class GamepadNavigationSession:
     transition_end = None
     transition_start_time = 0.0
     transition_duration = 0.0
+    scene_diagonal = 100.0
+    original_clip_start = None
+    original_clip_end = None
+    last_clip_time = 0.0
+    ground_walk = False
+    last_ground_time = 0.0
+    pending_ground_delta = Vector((0.0, 0.0, 0.0))
+    vibration_end_time = 0.0
+    last_collision_feedback = 0.0
 
     @classmethod
     def start(cls, context):
         cls.area = context.area
-        cls.rv3d = getattr(context.space_data, "region_3d", None)
+        cls.space = context.space_data
+        cls.rv3d = getattr(cls.space, "region_3d", None)
         cls.last_time = time.perf_counter()
         cls.connected = False
         cls.lb_was_down = False
@@ -361,6 +470,14 @@ class GamepadNavigationSession:
         cls.history_forward = []
         cls.transition_start = None
         cls.transition_end = None
+        cls.original_clip_start = cls.space.clip_start
+        cls.original_clip_end = cls.space.clip_end
+        cls.last_clip_time = 0.0
+        cls.ground_walk = False
+        cls.last_ground_time = 0.0
+        cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+        cls.vibration_end_time = 0.0
+        cls.last_collision_feedback = 0.0
         cls.active = True
         if cls.draw_handler is None:
             cls.draw_handler = bpy.types.SpaceView3D.draw_handler_add(
@@ -371,21 +488,35 @@ class GamepadNavigationSession:
 
     @classmethod
     def stop(cls):
+        cls.set_vibration(0.0, 0.0)
         cls.active = False
         cls.connected = False
         cls.lb_was_down = False
         cls.fly_velocity = Vector((0.0, 0.0, 0.0))
         cls.look_velocity = Vector((0.0, 0.0))
         cls.height_locked = False
+        cls.ground_walk = False
+        cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+        if cls.space is not None:
+            try:
+                if cls.original_clip_start is not None:
+                    cls.space.clip_start = cls.original_clip_start
+                if cls.original_clip_end is not None:
+                    cls.space.clip_end = cls.original_clip_end
+            except ReferenceError:
+                pass
         try:
             cls.area.tag_redraw()
         except (AttributeError, ReferenceError):
             pass
         cls.area = None
+        cls.space = None
         cls.rv3d = None
         cls.orbit_pivot = None
         cls.transition_start = None
         cls.transition_end = None
+        cls.original_clip_start = None
+        cls.original_clip_end = None
         if cls.draw_handler is not None:
             bpy.types.SpaceView3D.draw_handler_remove(cls.draw_handler, "WINDOW")
             cls.draw_handler = None
@@ -548,9 +679,93 @@ class GamepadNavigationSession:
             except (AttributeError, ReferenceError, TypeError):
                 continue
         if not found:
+            cls.scene_diagonal = 100.0
             return 1.0
         diagonal = (maximum - minimum).length
+        cls.scene_diagonal = max(diagonal, 0.001)
         return max(0.01, min(diagonal / 100.0, 1000.0))
+
+    @classmethod
+    def set_vibration(cls, left, right):
+        if XINPUT is None or not hasattr(XINPUT, "XInputSetState"):
+            return
+        addon = bpy.context.preferences.addons.get(ADDON_ID)
+        controller = addon.preferences.controller_index if addon else 0
+        vibration = XINPUT_VIBRATION(
+            int(max(0.0, min(left, 1.0)) * 65535),
+            int(max(0.0, min(right, 1.0)) * 65535),
+        )
+        XINPUT.XInputSetState(controller, ctypes.byref(vibration))
+
+    @classmethod
+    def pulse_vibration(cls, prefs, strength=1.0, duration=0.08):
+        if not prefs.vibration_feedback:
+            return
+        amount = prefs.vibration_strength * strength
+        cls.set_vibration(amount, amount)
+        cls.vibration_end_time = time.perf_counter() + duration
+
+    @classmethod
+    def update_vibration(cls, now):
+        if cls.vibration_end_time and now >= cls.vibration_end_time:
+            cls.set_vibration(0.0, 0.0)
+            cls.vibration_end_time = 0.0
+
+    @classmethod
+    def update_dynamic_clipping(cls, prefs, now):
+        if cls.space is None:
+            return
+        if not prefs.dynamic_clipping:
+            if cls.original_clip_start is not None:
+                cls.space.clip_start = cls.original_clip_start
+            if cls.original_clip_end is not None:
+                cls.space.clip_end = cls.original_clip_end
+            return
+        if now - cls.last_clip_time < 0.2:
+            return
+        cls.last_clip_time = now
+        scale = max(cls.scene_diagonal, 1.0)
+        cls.space.clip_start = max(0.0001, min(scale * 0.00001, 1.0))
+        cls.space.clip_end = max(
+            cls.original_clip_end or 1000.0,
+            scale * 4.0,
+            cls.current_fly_speed * 100.0,
+        )
+
+    @classmethod
+    def leveled_rotation(cls, rotation):
+        forward = rotation @ Vector((0.0, 0.0, -1.0))
+        if forward.length <= 0.000001:
+            return rotation.copy()
+        try:
+            return forward.normalized().to_track_quat("-Z", "Y")
+        except ValueError:
+            return rotation.copy()
+
+    @classmethod
+    def level_horizon(cls, duration):
+        target = cls.capture_view_state()
+        if target is None:
+            return False
+        camera_position = cls.camera_position()
+        rotation = cls.leveled_rotation(cls.rv3d.view_rotation)
+        distance = max(cls.rv3d.view_distance, 0.001)
+        target["view_rotation"] = rotation
+        target["view_location"] = (
+            camera_position - rotation @ Vector((0.0, 0.0, distance))
+        )
+        return cls.begin_transition(target, duration)
+
+    @classmethod
+    def stabilize_horizon(cls, prefs, dt):
+        if not prefs.horizon_stabilization:
+            return
+        rotation = cls.rv3d.view_rotation.copy()
+        target = cls.leveled_rotation(rotation)
+        factor = 1.0 - math.exp(-prefs.horizon_strength * dt)
+        leveled = rotation.slerp(target, factor)
+        camera_position = cls.camera_position(rotation)
+        cls.set_camera_transform(camera_position, leveled)
 
     @classmethod
     def update_adaptive_speed(cls, prefs, now, rotation):
@@ -582,6 +797,62 @@ class GamepadNavigationSession:
             cls.adaptive_speed_scale = max(0.05, min(distance / reference, 1.0))
         else:
             cls.adaptive_speed_scale = 1.0
+
+    @classmethod
+    def scene_ray_cast(cls, origin, direction, distance):
+        try:
+            result = bpy.context.scene.ray_cast(
+                bpy.context.evaluated_depsgraph_get(),
+                origin,
+                direction.normalized(),
+                distance=max(distance, 0.0001),
+            )
+            return result[0], Vector(result[1]), Vector(result[2])
+        except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+            return False, None, None
+
+    @classmethod
+    def apply_ground_walk(cls, camera_position, delta, prefs, now):
+        delta = delta.copy()
+        delta.z = 0.0
+        distance = delta.length
+
+        if prefs.collision_avoidance and distance > 0.000001:
+            hit, location, _normal = cls.scene_ray_cast(
+                camera_position,
+                delta,
+                distance + prefs.collision_radius,
+            )
+            if hit:
+                hit_distance = (location - camera_position).length
+                allowed = max(hit_distance - prefs.collision_radius, 0.0)
+                if allowed < distance:
+                    delta = delta.normalized() * allowed
+                    if now - cls.last_collision_feedback >= 0.25:
+                        cls.pulse_vibration(prefs, strength=1.0, duration=0.1)
+                        cls.last_collision_feedback = now
+
+        candidate = camera_position + delta
+        probe_lift = prefs.ground_step_height + 0.5
+        probe_distance = (
+            probe_lift + prefs.ground_eye_height + prefs.ground_probe_distance
+        )
+        origin = candidate + Vector((0.0, 0.0, probe_lift))
+        hit, location, normal = cls.scene_ray_cast(
+            origin, Vector((0.0, 0.0, -1.0)), probe_distance
+        )
+        if not hit:
+            candidate.z = camera_position.z
+            return candidate
+
+        minimum_normal_z = math.cos(prefs.ground_slope_angle)
+        desired_z = location.z + prefs.ground_eye_height
+        rise = desired_z - camera_position.z
+        if normal.z >= minimum_normal_z and rise <= prefs.ground_step_height:
+            candidate.z = desired_z
+        else:
+            candidate = camera_position.copy()
+        return candidate
 
     @classmethod
     def button_pressed(cls, buttons, mask):
@@ -726,6 +997,7 @@ class GamepadNavigationSession:
         now = time.perf_counter()
         dt = min(now - cls.last_time, 0.05)
         cls.last_time = now
+        cls.update_vibration(now)
 
         lx = axis_value(
             gamepad.sThumbLX, prefs.left_stick_deadzone, prefs.left_stick_curve
@@ -749,8 +1021,10 @@ class GamepadNavigationSession:
 
         if cls.button_pressed(buttons, XINPUT_GAMEPAD_DPAD_UP):
             cls.speed_gear = min(cls.speed_gear + 1, 3)
+            cls.pulse_vibration(prefs, strength=0.5)
         if cls.button_pressed(buttons, XINPUT_GAMEPAD_DPAD_DOWN):
             cls.speed_gear = max(cls.speed_gear - 1, -3)
+            cls.pulse_vibration(prefs, strength=0.35)
 
         lb_down = bool(buttons & XINPUT_GAMEPAD_LEFT_SHOULDER)
         if lb_down and not cls.lb_was_down:
@@ -760,6 +1034,7 @@ class GamepadNavigationSession:
                 prefs.navigation_mode = (
                     "FLY" if prefs.navigation_mode == "ORBIT" else "ORBIT"
                 )
+                cls.pulse_vibration(prefs, strength=0.6)
         cls.lb_was_down = lb_down
 
         previous_mode = cls.effective_mode
@@ -783,6 +1058,15 @@ class GamepadNavigationSession:
         rv3d = cls.rv3d
         rotation = rv3d.view_rotation.copy()
 
+        if cls.button_pressed(buttons, XINPUT_GAMEPAD_X):
+            cls.ground_walk = not cls.ground_walk
+            cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+            cls.last_ground_time = 0.0
+            cls.pulse_vibration(prefs, strength=0.75)
+        if cls.button_pressed(buttons, XINPUT_GAMEPAD_Y):
+            cls.level_horizon(prefs.transition_duration)
+            cls.pulse_vibration(prefs, strength=0.4)
+
         manual_input = max(abs(lx), abs(ly), abs(rx), abs(ry), lt, rt) > 0.01
         if manual_input:
             cls.cancel_transition()
@@ -797,6 +1081,7 @@ class GamepadNavigationSession:
                 cls.navigate_history(1, prefs.transition_duration)
 
         if cls.update_transition(now):
+            cls.update_dynamic_clipping(prefs, now)
             cls.previous_buttons = buttons
             return 0.01
 
@@ -833,6 +1118,9 @@ class GamepadNavigationSession:
                     - rotation @ Vector((0.0, 0.0, distance))
                 )
 
+            cls.stabilize_horizon(prefs, dt)
+            rotation = rv3d.view_rotation.copy()
+
             vertical = rt - lt
             target_velocity = Vector((lx, ly, vertical))
             if rb_down:
@@ -864,7 +1152,29 @@ class GamepadNavigationSession:
                 )
                 if rb_down:
                     movement.z = 0.0
-                rv3d.view_location += movement * cls.current_fly_speed * dt
+                delta = movement * cls.current_fly_speed * dt
+                camera_position = cls.camera_position(rotation)
+                if cls.ground_walk:
+                    cls.pending_ground_delta += delta
+                    if now - cls.last_ground_time >= (1.0 / 30.0):
+                        camera_position = cls.apply_ground_walk(
+                            camera_position, cls.pending_ground_delta, prefs, now
+                        )
+                        cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+                        cls.last_ground_time = now
+                    else:
+                        camera_position = None
+                else:
+                    camera_position += delta
+                if camera_position is not None:
+                    cls.set_camera_transform(camera_position, rotation)
+            elif cls.ground_walk and now - cls.last_ground_time >= (1.0 / 30.0):
+                camera_position = cls.apply_ground_walk(
+                    cls.camera_position(rotation), cls.pending_ground_delta, prefs, now
+                )
+                cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+                cls.last_ground_time = now
+                cls.set_camera_transform(camera_position, rotation)
         else:
             cls.height_locked = False
             cls.current_fly_speed = 0.0
@@ -901,6 +1211,7 @@ class GamepadNavigationSession:
                 )
                 cls.set_camera_transform(camera_position, rv3d.view_rotation.copy())
 
+        cls.update_dynamic_clipping(prefs, now)
         cls.previous_buttons = buttons
         return 0.01
 
@@ -1091,6 +1402,7 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
         box.label(text="Map rear buttons to L3 / R3")
         box.label(text="D-pad Up / Down: Speed gear")
         box.label(text="A / B: Focus / Face target")
+        box.label(text="X / Y: Ground walk / Level horizon")
         box.label(text="D-pad Left / Right: View history")
         if prefs and prefs.navigation_mode == "FLY":
             box.label(text="Hold RB: Lock world height")
@@ -1134,6 +1446,17 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
                 layout.prop(prefs, "look_response")
                 layout.prop(prefs, "scene_scale_speed")
                 layout.prop(prefs, "adaptive_speed")
+                layout.prop(prefs, "dynamic_clipping")
+                layout.prop(prefs, "horizon_stabilization")
+                if prefs.horizon_stabilization:
+                    layout.prop(prefs, "horizon_strength")
+                layout.prop(prefs, "ground_eye_height")
+                layout.prop(prefs, "ground_step_height")
+                layout.prop(prefs, "ground_probe_distance")
+                layout.prop(prefs, "ground_slope_angle")
+                layout.prop(prefs, "collision_avoidance")
+                if prefs.collision_avoidance:
+                    layout.prop(prefs, "collision_radius")
             else:
                 layout.prop(prefs, "pan_speed")
                 layout.prop(prefs, "zoom_speed")
@@ -1142,6 +1465,9 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
             layout.prop(prefs, "left_stick_curve")
             layout.prop(prefs, "right_stick_curve")
             layout.prop(prefs, "show_hud")
+            layout.prop(prefs, "vibration_feedback")
+            if prefs.vibration_feedback:
+                layout.prop(prefs, "vibration_strength")
             layout.prop(prefs, "invert_orbit_y")
             if prefs.navigation_mode == "ORBIT":
                 layout.prop(prefs, "invert_pan_y")

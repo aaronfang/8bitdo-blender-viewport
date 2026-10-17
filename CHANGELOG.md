@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 - 2026-10-17
+
+- Add X-button Ground mode with eye height, step, slope, and collision controls.
+- Add Y-button horizon leveling and optional gradual stabilization.
+- Add optional dynamic viewport clipping with automatic restoration on stop.
+- Add optional XInput vibration for navigation events and collisions.
+- Limit ground/collision queries to 30 Hz and clipping updates to 5 Hz.
+
 ## 1.2.0 - 2026-10-17
 
 - Add A-button target focus and B-button target facing.
