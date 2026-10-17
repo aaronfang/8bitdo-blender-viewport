@@ -76,6 +76,8 @@ Subsequent Orbit rotation and zoom use that independent pivot.
 ## Notes
 
 - The add-on controls the viewport, not scene cameras or objects.
+- Stopping navigation preserves the visible viewpoint and rebuilds a stable
+  native Blender orbit focus for subsequent mouse/keyboard navigation.
 - Ground mode uses world Z as up and follows ray-castable scene geometry.
 - Dynamic clipping restores the viewport's original clipping values when
   navigation stops.

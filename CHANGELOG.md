@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.1 - 2026-10-17
+
+- Rebase Blender's native mouse-navigation focus when gamepad navigation stops.
+- Preserve the exact visible viewpoint while deriving a stable orbit depth from
+  the sculpt stroke, selected components, selected objects, or scene scale.
+- Clarify that Fly/Orbit shown while inactive is the next controller mode.
+
 ## 1.3.0 - 2026-10-17
 
 - Add X-button Ground mode with eye height, step, slope, and collision controls.

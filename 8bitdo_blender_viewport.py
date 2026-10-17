@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 3, 0),
+    "version": (1, 3, 1),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -489,6 +489,8 @@ class GamepadNavigationSession:
     @classmethod
     def stop(cls):
         cls.set_vibration(0.0, 0.0)
+        if cls.active:
+            cls.prepare_native_navigation()
         cls.active = False
         cls.connected = False
         cls.lb_was_down = False
@@ -899,6 +901,26 @@ class GamepadNavigationSession:
         return sum(points, Vector()) / len(points)
 
     @classmethod
+    def contextual_focus(cls):
+        active_object = bpy.context.active_object
+        if (
+            active_object is not None
+            and active_object.mode == "SCULPT"
+            and cls.last_sculpt_object == active_object.name
+            and cls.last_sculpt_location is not None
+        ):
+            return cls.last_sculpt_location.copy()
+        if active_object is not None and active_object.mode == "EDIT":
+            component_center = cls.selected_components_center()
+            if component_center is not None:
+                return component_center
+        if bpy.context.mode == "OBJECT":
+            object_center = cls.selected_objects_center()
+            if object_center is not None:
+                return object_center
+        return None
+
+    @classmethod
     def selected_components_center(cls):
         points = []
         objects = getattr(bpy.context, "objects_in_mode_unique_data", ())
@@ -920,23 +942,39 @@ class GamepadNavigationSession:
 
     @classmethod
     def orbit_focus(cls):
-        active_object = bpy.context.active_object
-        if (
-            active_object is not None
-            and active_object.mode == "SCULPT"
-            and cls.last_sculpt_object == active_object.name
-            and cls.last_sculpt_location is not None
-        ):
-            return cls.last_sculpt_location.copy()
-        if active_object is not None and active_object.mode == "EDIT":
-            component_center = cls.selected_components_center()
-            if component_center is not None:
-                return component_center
-        if bpy.context.mode == "OBJECT":
-            object_center = cls.selected_objects_center()
-            if object_center is not None:
-                return object_center
+        focus = cls.contextual_focus()
+        if focus is not None:
+            return focus
         return cls.rv3d.view_location.copy()
+
+    @classmethod
+    def prepare_native_navigation(cls):
+        """Rebase Blender's native orbit focus without changing the visible view."""
+        if cls.rv3d is None:
+            return
+        try:
+            if getattr(cls.rv3d, "view_perspective", "PERSP") != "PERSP":
+                return
+            rotation = cls.rv3d.view_rotation.copy()
+            camera_position = cls.camera_position(rotation)
+            forward = rotation @ Vector((0.0, 0.0, -1.0))
+            focus = cls.contextual_focus()
+
+            depth = 0.0
+            if focus is not None:
+                depth = (focus - camera_position).dot(forward)
+
+            scene_reference = max(cls.scene_diagonal * 0.02, 0.1)
+            minimum_depth = max(cls.scene_diagonal * 0.00001, 0.001)
+            maximum_depth = max(cls.scene_diagonal * 4.0, scene_reference)
+            if not math.isfinite(depth) or depth <= minimum_depth:
+                depth = max(float(cls.rv3d.view_distance), scene_reference)
+            depth = max(minimum_depth, min(depth, maximum_depth))
+
+            cls.rv3d.view_location = camera_position + forward * depth
+            cls.rv3d.view_distance = depth
+        except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+            pass
 
     @classmethod
     def focus_orbit_view(cls):
@@ -1369,6 +1407,13 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
         prefs = addon.preferences if addon else None
 
         if prefs:
+            layout.label(
+                text=(
+                    "Controller Mode"
+                    if GamepadNavigationSession.active
+                    else "Next Controller Mode"
+                )
+            )
             layout.prop(prefs, "navigation_mode", expand=True)
             if GamepadNavigationSession.active:
                 layout.label(
@@ -1378,7 +1423,10 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
 
         if not GamepadNavigationSession.active:
             layout.operator("view3d.gamepad_navigation", text="Start", icon="PLAY")
-            layout.label(text="Controller inactive", icon="RADIOBUT_OFF")
+            layout.label(
+                text="Controller inactive - native mouse navigation",
+                icon="RADIOBUT_OFF",
+            )
         else:
             layout.operator("view3d.gamepad_navigation", text="Stop", icon="PAUSE")
             if GamepadNavigationSession.connected:

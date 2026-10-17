@@ -224,6 +224,44 @@ def test_ground_walk_and_dynamic_clipping():
     session.space = None
 
 
+def test_native_navigation_rebase_preserves_view():
+    reset_scene()
+    bpy.ops.mesh.primitive_cube_add(location=(3.0, 0.0, 0.0))
+    session = addon.GamepadNavigationSession
+    session.rv3d = SimpleNamespace(
+        view_location=Vector((0.0, 0.0, 9.99)),
+        view_distance=0.01,
+        view_rotation=Quaternion((1.0, 0.0, 0.0, 0.0)),
+    )
+    session.scene_diagonal = math.sqrt(12.0)
+    camera_before = session.camera_position()
+    rotation_before = session.rv3d.view_rotation.copy()
+
+    session.prepare_native_navigation()
+
+    camera_after = session.camera_position()
+    assert (camera_after - camera_before).length < 1.0e-6
+    assert session.rv3d.view_rotation.rotation_difference(rotation_before).angle < 1.0e-6
+    assert_close(session.rv3d.view_distance, 10.0)
+    assert (session.rv3d.view_location - Vector((0.0, 0.0, 0.0))).length < 1.0e-6
+
+    bpy.ops.object.select_all(action="DESELECT")
+    session.rv3d.view_location = Vector((0.0, 0.0, 9.999))
+    session.rv3d.view_distance = 0.001
+    session.scene_diagonal = 1000.0
+    camera_before = session.camera_position()
+    session.prepare_native_navigation()
+    assert (session.camera_position() - camera_before).length < 1.0e-6
+    assert_close(session.rv3d.view_distance, 20.0)
+
+    session.rv3d.view_perspective = "ORTHO"
+    location_before = session.rv3d.view_location.copy()
+    distance_before = session.rv3d.view_distance
+    session.prepare_native_navigation()
+    assert (session.rv3d.view_location - location_before).length < 1.0e-6
+    assert session.rv3d.view_distance == distance_before
+
+
 def main():
     addon.register()
     try:
@@ -236,6 +274,7 @@ def main():
         test_bookmark_persistence()
         test_horizon_level_preserves_forward_direction()
         test_ground_walk_and_dynamic_clipping()
+        test_native_navigation_rebase_preserves_view()
     finally:
         addon.unregister()
     print("ALL_TESTS_PASSED")
