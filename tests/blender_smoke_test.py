@@ -214,6 +214,18 @@ def test_ground_walk_and_dynamic_clipping():
         ground_probe_distance=10.0,
         ground_slope_angle=math.radians(50.0),
     )
+    session.ground_initialized = False
+    result = session.apply_ground_walk(
+        Vector((0.0, 0.0, 0.4)),
+        Vector((1.0, 0.0, 0.0)),
+        ground_prefs,
+        0.5,
+    )
+    assert_close(result.x, 1.0)
+    assert_close(result.z, 1.7)
+    assert session.ground_initialized
+
+    session.ground_initialized = False
     result = session.apply_ground_walk(
         Vector((0.0, 0.0, 5.0)),
         Vector((1.0, 0.0, 0.0)),

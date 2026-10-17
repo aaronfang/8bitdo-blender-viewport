@@ -124,6 +124,11 @@ overpowering close-surface precision.
 | Collision Avoidance | Prevents Ground mode from moving through forward geometry. |
 | Collision Radius | Clearance retained between the viewpoint and a detected obstacle. |
 
+On entering Ground mode, the viewpoint first aligns to Ground Eye Height even
+when that correction is larger than Maximum Step. Maximum Step applies to
+subsequent terrain changes. Ground rays run only while aligning or moving, so
+an idle controller does not continuously query scene geometry.
+
 ### Input And Display
 
 Left/right stick deadzones and response curves are independent. A higher curve

@@ -87,6 +87,10 @@ Horizon Stabilization 会逐渐消除视角的侧向滚转，让世界 Z 轴保�
 | Collision Avoidance | 使用前向射线避免穿墙。 |
 | Collision Radius | 观察点与墙面之间保留的安全距离。 |
 
+进入 Ground 模式时，视点会先对齐到 Ground Eye Height；即使这次初始抬升
+超过 Maximum Step 也不会被阻止。Maximum Step 只限制后续地形高度变化。
+初始对齐完成后，手柄静止时不会继续查询场景地面，以减少大场景中的额外开销。
+
 ## Dynamic View Clipping
 
 根据场景尺寸和移动速度调整视窗的近裁剪与远裁剪，减少大场景中远处消失或

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 4, 0),
+    "version": (1, 4, 1),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -44,6 +44,7 @@ XINPUT_GAMEPAD_X = 0x4000
 XINPUT_GAMEPAD_Y = 0x8000
 TEMPORARY_MODE_BUTTONS = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB
 LB_TAP_SECONDS = 0.25
+GROUND_UPDATE_INTERVAL = 1.0 / 20.0
 
 
 class XINPUT_GAMEPAD(ctypes.Structure):
@@ -543,6 +544,7 @@ class GamepadNavigationSession:
     original_clip_end = None
     last_clip_time = 0.0
     ground_walk = False
+    ground_initialized = False
     last_ground_time = 0.0
     pending_ground_delta = Vector((0.0, 0.0, 0.0))
     vibration_end_time = 0.0
@@ -593,6 +595,7 @@ class GamepadNavigationSession:
         cls.original_clip_end = cls.space.clip_end
         cls.last_clip_time = 0.0
         cls.ground_walk = False
+        cls.ground_initialized = False
         cls.last_ground_time = 0.0
         cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
         cls.vibration_end_time = 0.0
@@ -620,6 +623,7 @@ class GamepadNavigationSession:
         cls.horizon_active = False
         cls.clipping_active = False
         cls.ground_walk = False
+        cls.ground_initialized = False
         cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
         if cls.space is not None:
             try:
@@ -955,10 +959,12 @@ class GamepadNavigationSession:
         )
 
     @classmethod
-    def scene_ray_cast(cls, origin, direction, distance):
+    def scene_ray_cast(cls, origin, direction, distance, depsgraph=None):
         try:
+            if depsgraph is None:
+                depsgraph = bpy.context.evaluated_depsgraph_get()
             result = bpy.context.scene.ray_cast(
-                bpy.context.evaluated_depsgraph_get(),
+                depsgraph,
                 origin,
                 direction.normalized(),
                 distance=max(distance, 0.0001),
@@ -972,12 +978,18 @@ class GamepadNavigationSession:
         delta = delta.copy()
         delta.z = 0.0
         distance = delta.length
+        initial_alignment = not cls.ground_initialized
+        try:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+        except (AttributeError, ReferenceError, RuntimeError):
+            depsgraph = None
 
         if prefs.collision_avoidance and distance > 0.000001:
             hit, location, _normal = cls.scene_ray_cast(
                 camera_position,
                 delta,
                 distance + prefs.collision_radius,
+                depsgraph,
             )
             if hit:
                 hit_distance = (location - camera_position).length
@@ -995,8 +1007,12 @@ class GamepadNavigationSession:
         )
         origin = candidate + Vector((0.0, 0.0, probe_lift))
         hit, location, normal = cls.scene_ray_cast(
-            origin, Vector((0.0, 0.0, -1.0)), probe_distance
+            origin,
+            Vector((0.0, 0.0, -1.0)),
+            probe_distance,
+            depsgraph,
         )
+        cls.ground_initialized = True
         if not hit:
             candidate.z = camera_position.z
             return candidate
@@ -1004,7 +1020,9 @@ class GamepadNavigationSession:
         minimum_normal_z = math.cos(prefs.ground_slope_angle)
         desired_z = location.z + prefs.ground_eye_height
         rise = desired_z - camera_position.z
-        if normal.z >= minimum_normal_z and rise <= prefs.ground_step_height:
+        if normal.z >= minimum_normal_z and (
+            initial_alignment or rise <= prefs.ground_step_height
+        ):
             candidate.z = desired_z
         else:
             candidate = camera_position.copy()
@@ -1257,6 +1275,7 @@ class GamepadNavigationSession:
 
         if cls.button_pressed(buttons, XINPUT_GAMEPAD_X):
             cls.ground_walk = not cls.ground_walk
+            cls.ground_initialized = False
             cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
             cls.last_ground_time = 0.0
             cls.pulse_vibration(prefs, strength=0.75)
@@ -1350,7 +1369,7 @@ class GamepadNavigationSession:
                 camera_position = cls.camera_position(rotation)
                 if cls.ground_walk:
                     cls.pending_ground_delta += delta
-                    if now - cls.last_ground_time >= (1.0 / 30.0):
+                    if now - cls.last_ground_time >= GROUND_UPDATE_INTERVAL:
                         camera_position = cls.apply_ground_walk(
                             camera_position, cls.pending_ground_delta, prefs, now
                         )
@@ -1362,7 +1381,11 @@ class GamepadNavigationSession:
                     camera_position += delta
                 if camera_position is not None:
                     cls.set_camera_transform(camera_position, rotation)
-            elif cls.ground_walk and now - cls.last_ground_time >= (1.0 / 30.0):
+            elif (
+                cls.ground_walk
+                and not cls.ground_initialized
+                and now - cls.last_ground_time >= GROUND_UPDATE_INTERVAL
+            ):
                 camera_position = cls.apply_ground_walk(
                     cls.camera_position(rotation), cls.pending_ground_delta, prefs, now
                 )

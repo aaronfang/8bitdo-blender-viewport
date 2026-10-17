@@ -95,6 +95,7 @@ timers, and XInput vibration must all be removed during stop and unregister.
 
 - Input and view update: approximately 100 Hz.
 - Forward proximity ray: at most 10 Hz.
-- Ground/collision rays: at most 30 Hz while moving.
+- Ground/collision rays: at most 20 Hz while moving; one initial alignment
+  query on activation and no repeated queries while idle.
 - Scene bounds: on start or explicit refresh, never every timer tick.
 - Overlay: redraw with the viewport; no independent timer.

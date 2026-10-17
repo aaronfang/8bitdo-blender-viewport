@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1 - 2026-10-18
+
+- Allow the initial Ground alignment to raise a low viewpoint to Ground Eye
+  Height without treating the correction as an oversized step.
+- Stop repeated ground ray casts while the controller is idle after the initial
+  alignment.
+- Reduce moving ground probes to 20 Hz and reuse one evaluated dependency graph
+  for ground and collision rays in each update.
+
 ## 1.4.0 - 2026-10-17
 
 - Add configurable adaptive start distance, minimum speed, and response curve.
