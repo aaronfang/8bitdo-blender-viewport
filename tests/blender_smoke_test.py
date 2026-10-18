@@ -345,6 +345,83 @@ def test_native_navigation_rebase_preserves_view():
     assert session.rv3d.view_distance == distance_before
 
 
+def test_sculpt_focus_follows_object_without_view_change():
+    reset_scene()
+    bpy.ops.mesh.primitive_cube_add()
+    obj = bpy.context.active_object
+    bpy.ops.object.mode_set(mode="SCULPT")
+    manager = addon.LargeSceneNavigationManager
+    manager.focus_by_object.clear()
+    key = manager.object_key(obj)
+    manager.focus_by_object[key] = {
+        "local_location": Vector((1.0, 0.0, 0.0)),
+        "world_fallback": Vector((1.0, 0.0, 0.0)),
+    }
+    obj.location = (10.0, 2.0, 0.0)
+    bpy.context.view_layer.update()
+
+    focus = manager.sculpt_focus(bpy.context)
+    assert (focus - Vector((11.0, 2.0, 0.0))).length < 1.0e-6
+
+    rv3d = SimpleNamespace(
+        view_location=Vector((2.0, 3.0, 4.0)),
+        view_rotation=Quaternion((1.0, 0.0, 0.0, 0.0)),
+        view_distance=25.0,
+    )
+    view_before = manager.capture_view(rv3d)
+    assert (manager.sculpt_focus(bpy.context) - focus).length < 1.0e-6
+    view_after = manager.capture_view(rv3d)
+    assert manager.views_match(view_before, view_after)
+    manager.focus_by_object.clear()
+
+
+def test_native_view_history_is_per_viewport():
+    class Pointer:
+        def __init__(self, value):
+            self.value = value
+
+        def as_pointer(self):
+            return self.value
+
+    class Area(Pointer):
+        def tag_redraw(self):
+            pass
+
+    manager = addon.LargeSceneNavigationManager
+    rv3d = SimpleNamespace(
+        view_location=Vector((5.0, 0.0, 0.0)),
+        view_rotation=Quaternion((1.0, 0.0, 0.0, 0.0)),
+        view_distance=20.0,
+    )
+    window, area, space = Pointer(1), Area(2), Pointer(3)
+    space.region_3d = rv3d
+    context = SimpleNamespace(window=window, area=area, space_data=space)
+    key = manager.viewport_key(window, area, space)
+    previous = {
+        "view_location": Vector(),
+        "view_rotation": Quaternion((1.0, 0.0, 0.0, 0.0)),
+        "view_distance": 10.0,
+    }
+    manager.viewport_states[key] = {
+        "rv3d": rv3d,
+        "area": area,
+        "back": [previous],
+        "forward": [],
+        "last": manager.capture_view(rv3d),
+        "committed": manager.capture_view(rv3d),
+        "moving": False,
+        "suppress_until": 0.0,
+    }
+
+    assert manager.history_step(context, -1)
+    assert rv3d.view_location.length == 0.0
+    assert_close(rv3d.view_distance, 10.0)
+    assert manager.history_step(context, 1)
+    assert (rv3d.view_location - Vector((5.0, 0.0, 0.0))).length < 1.0e-6
+    assert_close(rv3d.view_distance, 20.0)
+    manager.viewport_states.clear()
+
+
 def main():
     addon.register()
     try:
@@ -359,6 +436,8 @@ def main():
         test_horizon_level_preserves_forward_direction()
         test_ground_walk_and_dynamic_clipping()
         test_native_navigation_rebase_preserves_view()
+        test_sculpt_focus_follows_object_without_view_change()
+        test_native_view_history_is_per_viewport()
     finally:
         addon.unregister()
     print("ALL_TESTS_PASSED")

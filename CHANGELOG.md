@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.0 - 2026-10-18
+
+- Add opt-in large-scene mouse and keyboard navigation enhancements while
+  preserving Blender's native keymap.
+- Remember sculpt work points per object in local coordinates and expose
+  operators to return to or clear the active work point.
+- Configure native Orbit Around Selection, Zoom to Mouse, and Auto Depth with
+  reversible preferences.
+- Add independent per-viewport history for settled native view changes.
+- Add per-viewport dynamic clipping management with restoration when disabled
+  or when the add-on is unloaded.
+- Reuse the same sculpt focus for Gamepad orbit and zoom gesture activation.
+- Add registration, core state, multi-viewport, and native-settings regression
+  coverage for Blender 4.5.
+
 ## 1.4.4 - 2026-10-18
 
 - Pause unchanged nonzero input after a configurable timeout (3 seconds by

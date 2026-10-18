@@ -1,10 +1,10 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 4, 4),
+    "version": (1, 5, 0),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
-    "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
+    "description": "Large-scene mouse, keyboard, and XInput viewport navigation",
     "category": "3D View",
 }
 
@@ -16,6 +16,7 @@ import time
 import bmesh
 import blf
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -267,6 +268,44 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         ),
         default="FLY",
     )
+    smart_navigation_enabled: BoolProperty(
+        name="Large Scene Navigation",
+        description="Enhance Blender's native mouse and keyboard navigation without replacing its keymap",
+        default=True,
+    )
+    sculpt_focus_enabled: BoolProperty(
+        name="Remember Sculpt Work Point",
+        description="Keep the last valid sculpt stroke center as the navigation target",
+        default=True,
+    )
+    native_orbit_around_focus: BoolProperty(
+        name="Orbit Around Work Point",
+        description="Use Blender's native Orbit Around Selection support, including its sculpt stroke center",
+        default=True,
+    )
+    native_zoom_to_mouse: BoolProperty(
+        name="Zoom to Mouse Position",
+        description="Use the surface under the mouse as Blender's native zoom target",
+        default=True,
+    )
+    native_auto_depth: BoolProperty(
+        name="Auto Depth Navigation",
+        description="Use scene depth under the mouse when native navigation begins",
+        default=True,
+    )
+    native_view_history: BoolProperty(
+        name="Mouse and Keyboard View History",
+        description="Record settled native viewport changes for Previous and Next View",
+        default=True,
+    )
+    history_idle_delay: FloatProperty(
+        name="History Settle Time",
+        description="Time without viewport movement before a native view is committed to history",
+        default=0.4,
+        min=0.1,
+        max=2.0,
+        subtype="TIME",
+    )
     controller_index: IntProperty(
         name="Controller",
         description="XInput controller index (usually 0 for the first controller)",
@@ -503,6 +542,20 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        navigation = layout.box()
+        navigation.label(text="Mouse and Keyboard")
+        navigation.prop(self, "smart_navigation_enabled")
+        column = navigation.column()
+        column.enabled = self.smart_navigation_enabled
+        column.prop(self, "sculpt_focus_enabled")
+        column.prop(self, "native_orbit_around_focus")
+        column.prop(self, "native_zoom_to_mouse")
+        column.prop(self, "native_auto_depth")
+        column.prop(self, "native_view_history")
+        if self.native_view_history:
+            column.prop(self, "history_idle_delay")
+        column.prop(self, "dynamic_clipping")
+        layout.separator()
         layout.prop(self, "navigation_mode", expand=True)
         layout.prop(self, "controller_index")
         layout.prop(self, "input_timeout")
@@ -532,7 +585,6 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "show_hud")
         layout.prop(self, "show_control_hud")
         layout.prop(self, "transition_duration")
-        layout.prop(self, "dynamic_clipping")
         layout.prop(self, "horizon_stabilization")
         layout.prop(self, "horizon_strength")
         layout.prop(self, "ground_eye_height")
@@ -545,6 +597,387 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "vibration_strength")
         layout.prop(self, "invert_orbit_y")
         layout.prop(self, "invert_pan_y")
+
+
+class LargeSceneNavigationManager:
+    """Track work targets and native views without replacing Blender's keymap."""
+
+    focus_by_object = {}
+    last_stroke_signature = None
+    focus_revision = 0
+    viewport_states = {}
+    clip_originals = {}
+    native_input_originals = None
+    native_settings_applied = False
+    scene_scale_cache = {}
+
+    @classmethod
+    def reset(cls):
+        cls.focus_by_object.clear()
+        cls.last_stroke_signature = None
+        cls.focus_revision += 1
+        cls.viewport_states.clear()
+        cls.clip_originals.clear()
+        cls.scene_scale_cache.clear()
+
+    @classmethod
+    def object_key(cls, obj):
+        try:
+            return obj.as_pointer(), obj.name_full
+        except (AttributeError, ReferenceError):
+            return None
+
+    @classmethod
+    def capture_sculpt_location(cls, context=None):
+        context = context or bpy.context
+        addon = context.preferences.addons.get(ADDON_ID)
+        if (
+            addon is None
+            or not addon.preferences.smart_navigation_enabled
+            or not addon.preferences.sculpt_focus_enabled
+        ):
+            return False
+        active_object = context.active_object
+        if active_object is None or active_object.mode != "SCULPT":
+            return False
+
+        try:
+            operators = reversed(context.window_manager.operators)
+        except (AttributeError, ReferenceError):
+            return False
+
+        for operator in operators:
+            if getattr(operator, "bl_idname", "") != "SCULPT_OT_brush_stroke":
+                continue
+            try:
+                stroke = getattr(operator, "stroke", None)
+                if stroke is None:
+                    stroke = getattr(operator.properties, "stroke", None)
+                if not stroke:
+                    return False
+                locations = [Vector(sample.location) for sample in stroke]
+                locations = [
+                    location
+                    for location in locations
+                    if all(math.isfinite(value) for value in location)
+                ]
+                if not locations:
+                    return False
+                world_location = sum(locations, Vector()) / len(locations)
+                last_location = locations[-1]
+                key = cls.object_key(active_object)
+                signature = (
+                    key,
+                    len(stroke),
+                    tuple(round(value, 7) for value in last_location),
+                )
+                if signature == cls.last_stroke_signature:
+                    return False
+                local_location = (
+                    active_object.matrix_world.inverted_safe() @ world_location
+                )
+                cls.focus_by_object[key] = {
+                    "local_location": local_location,
+                    "world_fallback": world_location,
+                }
+                if len(cls.focus_by_object) > 32:
+                    del cls.focus_by_object[next(iter(cls.focus_by_object))]
+                cls.last_stroke_signature = signature
+                cls.focus_revision += 1
+                return True
+            except (AttributeError, ReferenceError, RuntimeError, TypeError, ValueError):
+                return False
+        return False
+
+    @classmethod
+    def sculpt_focus(cls, context=None):
+        context = context or bpy.context
+        active_object = context.active_object
+        if active_object is None or active_object.mode != "SCULPT":
+            return None
+        record = cls.focus_by_object.get(cls.object_key(active_object))
+        if record is None:
+            return None
+        try:
+            return active_object.matrix_world @ record["local_location"]
+        except (AttributeError, ReferenceError, TypeError):
+            return record["world_fallback"].copy()
+
+    @classmethod
+    def selected_objects_center(cls, context=None):
+        context = context or bpy.context
+        points = []
+        for obj in context.selected_objects:
+            try:
+                points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
+            except (AttributeError, ReferenceError, TypeError):
+                try:
+                    points.append(obj.matrix_world.translation.copy())
+                except (AttributeError, ReferenceError):
+                    pass
+        return sum(points, Vector()) / len(points) if points else None
+
+    @classmethod
+    def selected_components_center(cls, context=None):
+        context = context or bpy.context
+        points = []
+        objects = getattr(context, "objects_in_mode_unique_data", ())
+        for obj in objects:
+            if obj.type != "MESH" or obj.mode != "EDIT":
+                continue
+            try:
+                mesh = bmesh.from_edit_mesh(obj.data)
+                points.extend(
+                    obj.matrix_world @ vertex.co
+                    for vertex in mesh.verts
+                    if vertex.select
+                )
+            except (ReferenceError, RuntimeError, TypeError):
+                continue
+        return sum(points, Vector()) / len(points) if points else None
+
+    @classmethod
+    def contextual_focus(cls, context=None):
+        context = context or bpy.context
+        addon = context.preferences.addons.get(ADDON_ID)
+        prefs = addon.preferences if addon else None
+        active_object = context.active_object
+        if prefs and prefs.smart_navigation_enabled and prefs.sculpt_focus_enabled:
+            focus = cls.sculpt_focus(context)
+            if focus is not None:
+                return focus
+        if active_object is not None and active_object.mode == "EDIT":
+            focus = cls.selected_components_center(context)
+            if focus is not None:
+                return focus
+        if context.mode == "OBJECT":
+            return cls.selected_objects_center(context)
+        return None
+
+    @staticmethod
+    def capture_view(rv3d):
+        return {
+            "view_location": rv3d.view_location.copy(),
+            "view_rotation": rv3d.view_rotation.copy(),
+            "view_distance": float(rv3d.view_distance),
+        }
+
+    @staticmethod
+    def apply_view(rv3d, state):
+        rv3d.view_location = state["view_location"].copy()
+        rv3d.view_rotation = state["view_rotation"].copy()
+        rv3d.view_distance = state["view_distance"]
+
+    @staticmethod
+    def views_match(first, second):
+        distance = max(first["view_distance"], second["view_distance"], 0.001)
+        if (first["view_location"] - second["view_location"]).length > distance * 1e-6:
+            return False
+        if abs(first["view_distance"] - second["view_distance"]) > distance * 1e-6:
+            return False
+        return abs(first["view_rotation"].dot(second["view_rotation"])) > 0.9999999
+
+    @staticmethod
+    def viewport_key(window, area, space):
+        return window.as_pointer(), area.as_pointer(), space.as_pointer()
+
+    @classmethod
+    def iter_viewports(cls):
+        try:
+            windows = tuple(bpy.context.window_manager.windows)
+        except (AttributeError, ReferenceError):
+            return
+        for window in windows:
+            try:
+                areas = tuple(window.screen.areas)
+            except (AttributeError, ReferenceError):
+                continue
+            for area in areas:
+                if area.type != "VIEW_3D":
+                    continue
+                try:
+                    space = area.spaces.active
+                    rv3d = space.region_3d
+                    yield window, area, space, rv3d
+                except (AttributeError, ReferenceError):
+                    continue
+
+    @classmethod
+    def update_history(cls, prefs, now):
+        live_keys = set()
+        for window, area, space, rv3d in cls.iter_viewports():
+            key = cls.viewport_key(window, area, space)
+            live_keys.add(key)
+            current = cls.capture_view(rv3d)
+            state = cls.viewport_states.get(key)
+            if state is None:
+                cls.viewport_states[key] = {
+                    "window": window,
+                    "area": area,
+                    "space": space,
+                    "rv3d": rv3d,
+                    "committed": current,
+                    "last": current,
+                    "moving": False,
+                    "last_change": now,
+                    "back": [],
+                    "forward": [],
+                    "suppress_until": 0.0,
+                }
+                continue
+            state.update(window=window, area=area, space=space, rv3d=rv3d)
+            if now < state["suppress_until"]:
+                state["last"] = current
+                state["committed"] = current
+                continue
+            if not cls.views_match(current, state["last"]):
+                if not state["moving"]:
+                    state["back"].append(state["committed"])
+                    del state["back"][:-32]
+                    state["forward"].clear()
+                    state["moving"] = True
+                state["last"] = current
+                state["last_change"] = now
+            elif state["moving"] and now - state["last_change"] >= prefs.history_idle_delay:
+                state["committed"] = current
+                state["moving"] = False
+        for key in tuple(cls.viewport_states):
+            if key not in live_keys:
+                del cls.viewport_states[key]
+
+    @classmethod
+    def history_step(cls, context, direction):
+        try:
+            key = cls.viewport_key(context.window, context.area, context.space_data)
+            state = cls.viewport_states[key]
+        except (AttributeError, KeyError, ReferenceError):
+            return False
+        source = state["back"] if direction < 0 else state["forward"]
+        destination = state["forward"] if direction < 0 else state["back"]
+        if not source:
+            return False
+        current = cls.capture_view(state["rv3d"])
+        target = source.pop()
+        destination.append(current)
+        del destination[:-32]
+        cls.apply_view(state["rv3d"], target)
+        state["last"] = target
+        state["committed"] = target
+        state["moving"] = False
+        state["suppress_until"] = time.perf_counter() + 0.25
+        state["area"].tag_redraw()
+        return True
+
+    @classmethod
+    def scene_diagonal(cls, scene, now):
+        key = scene.as_pointer()
+        cached = cls.scene_scale_cache.get(key)
+        if cached and now - cached[0] < 5.0:
+            return cached[1]
+        minimum = Vector((math.inf, math.inf, math.inf))
+        maximum = Vector((-math.inf, -math.inf, -math.inf))
+        found = False
+        for obj in scene.objects:
+            try:
+                for corner in obj.bound_box:
+                    point = obj.matrix_world @ Vector(corner)
+                    minimum.x = min(minimum.x, point.x)
+                    minimum.y = min(minimum.y, point.y)
+                    minimum.z = min(minimum.z, point.z)
+                    maximum.x = max(maximum.x, point.x)
+                    maximum.y = max(maximum.y, point.y)
+                    maximum.z = max(maximum.z, point.z)
+                    found = True
+            except (AttributeError, ReferenceError, TypeError):
+                continue
+        diagonal = max((maximum - minimum).length, 0.001) if found else 100.0
+        cls.scene_scale_cache[key] = now, diagonal
+        return diagonal
+
+    @classmethod
+    def update_clipping(cls, prefs, now):
+        live_keys = set()
+        for window, area, space, rv3d in cls.iter_viewports():
+            key = cls.viewport_key(window, area, space)
+            live_keys.add(key)
+            if prefs.smart_navigation_enabled and prefs.dynamic_clipping:
+                if key not in cls.clip_originals:
+                    cls.clip_originals[key] = space, space.clip_start, space.clip_end
+                diagonal = cls.scene_diagonal(window.scene, now)
+                distance = max(float(rv3d.view_distance), 0.001)
+                space.clip_start = max(
+                    0.0001,
+                    min(distance * 0.0001, diagonal * 0.00001, 1.0),
+                )
+                space.clip_end = max(
+                    cls.clip_originals[key][2], diagonal * 4.0, distance * 100.0
+                )
+            elif key in cls.clip_originals:
+                _space, clip_start, clip_end = cls.clip_originals.pop(key)
+                space.clip_start = clip_start
+                space.clip_end = clip_end
+        for key in tuple(cls.clip_originals):
+            if key not in live_keys:
+                del cls.clip_originals[key]
+
+    @classmethod
+    def apply_native_settings(cls, prefs):
+        inputs = bpy.context.preferences.inputs
+        enabled = prefs.smart_navigation_enabled
+        if enabled and not cls.native_settings_applied:
+            cls.native_input_originals = (
+                inputs.use_rotate_around_active,
+                inputs.use_zoom_to_mouse,
+                inputs.use_mouse_depth_navigate,
+            )
+            cls.native_settings_applied = True
+        if enabled:
+            inputs.use_rotate_around_active = prefs.native_orbit_around_focus
+            inputs.use_zoom_to_mouse = prefs.native_zoom_to_mouse
+            inputs.use_mouse_depth_navigate = prefs.native_auto_depth
+        elif cls.native_settings_applied:
+            cls.restore_native_settings()
+
+    @classmethod
+    def restore_native_settings(cls):
+        if not cls.native_settings_applied or cls.native_input_originals is None:
+            return
+        inputs = bpy.context.preferences.inputs
+        (
+            inputs.use_rotate_around_active,
+            inputs.use_zoom_to_mouse,
+            inputs.use_mouse_depth_navigate,
+        ) = cls.native_input_originals
+        cls.native_settings_applied = False
+        cls.native_input_originals = None
+
+    @classmethod
+    def restore_clipping(cls):
+        for space, clip_start, clip_end in cls.clip_originals.values():
+            try:
+                space.clip_start = clip_start
+                space.clip_end = clip_end
+            except ReferenceError:
+                pass
+        cls.clip_originals.clear()
+
+    @classmethod
+    def tick(cls):
+        addon = bpy.context.preferences.addons.get(ADDON_ID)
+        if addon is None:
+            cls.restore_native_settings()
+            cls.restore_clipping()
+            return None
+        prefs = addon.preferences
+        now = time.perf_counter()
+        cls.apply_native_settings(prefs)
+        cls.capture_sculpt_location()
+        if prefs.smart_navigation_enabled and prefs.native_view_history:
+            cls.update_history(prefs, now)
+        else:
+            cls.viewport_states.clear()
+        cls.update_clipping(prefs, now)
+        return 0.05
 
 
 class GamepadNavigationSession:
@@ -562,6 +995,7 @@ class GamepadNavigationSession:
     last_sculpt_location = None
     last_sculpt_object = None
     orbit_pivot = None
+    orbit_input_active = False
     previous_buttons = 0
     speed_gear = 0
     scene_speed_scale = 1.0
@@ -626,6 +1060,7 @@ class GamepadNavigationSession:
         cls.last_sculpt_location = None
         cls.last_sculpt_object = None
         cls.orbit_pivot = None
+        cls.orbit_input_active = False
         cls.previous_buttons = 0
         cls.speed_gear = 0
         cls.scene_speed_scale = cls.calculate_scene_speed_scale()
@@ -651,6 +1086,7 @@ class GamepadNavigationSession:
         cls.pan_speed = addon.preferences.pan_speed if addon else 0.0
         cls.zoom_speed = addon.preferences.zoom_speed if addon else 0.0
         cls.orbit_boost = False
+        cls.orbit_input_active = False
         cls.height_locked = False
         cls.show_hud = addon.preferences.show_hud if addon else True
         cls.show_control_hud = addon.preferences.show_control_hud if addon else True
@@ -664,8 +1100,9 @@ class GamepadNavigationSession:
         cls.history_forward = []
         cls.transition_start = None
         cls.transition_end = None
-        cls.original_clip_start = cls.space.clip_start
-        cls.original_clip_end = cls.space.clip_end
+        # Native and controller navigation share the per-viewport clipping manager.
+        cls.original_clip_start = None
+        cls.original_clip_end = None
         cls.last_clip_time = 0.0
         cls.ground_walk = False
         cls.ground_initialized = False
@@ -693,6 +1130,7 @@ class GamepadNavigationSession:
         cls.look_velocity = Vector((0.0, 0.0))
         cls.height_locked = False
         cls.orbit_boost = False
+        cls.orbit_input_active = False
         cls.horizon_active = False
         cls.clipping_active = False
         cls.ground_walk = False
@@ -914,9 +1352,25 @@ class GamepadNavigationSession:
 
     @classmethod
     def update_dynamic_clipping(cls, prefs, now):
+        enabled = bool(
+            getattr(prefs, "smart_navigation_enabled", True)
+            and prefs.dynamic_clipping
+        )
+        cls.clipping_active = enabled
         if cls.space is None:
             return
-        if not prefs.dynamic_clipping:
+
+        managed_spaces = {
+            record[0].as_pointer()
+            for record in LargeSceneNavigationManager.clip_originals.values()
+        }
+        try:
+            if cls.space.as_pointer() in managed_spaces:
+                return
+        except (AttributeError, ReferenceError):
+            pass
+
+        if not enabled:
             if cls.original_clip_start is not None:
                 cls.space.clip_start = cls.original_clip_start
             if cls.original_clip_end is not None:
@@ -1107,28 +1561,12 @@ class GamepadNavigationSession:
 
     @classmethod
     def capture_sculpt_location(cls):
+        LargeSceneNavigationManager.capture_sculpt_location()
+        focus = LargeSceneNavigationManager.sculpt_focus()
         active_object = bpy.context.active_object
-        if active_object is None or active_object.mode != "SCULPT":
-            return
-
-        try:
-            operators = reversed(bpy.context.window_manager.operators)
-        except (AttributeError, ReferenceError):
-            return
-
-        for operator in operators:
-            if getattr(operator, "bl_idname", "") != "SCULPT_OT_brush_stroke":
-                continue
-            try:
-                stroke = getattr(operator, "stroke", None)
-                if stroke is None:
-                    stroke = getattr(operator.properties, "stroke", None)
-                if stroke:
-                    cls.last_sculpt_location = Vector(stroke[-1].location)
-                    cls.last_sculpt_object = active_object.name
-            except (AttributeError, ReferenceError, TypeError):
-                pass
-            break
+        if focus is not None and active_object is not None:
+            cls.last_sculpt_location = focus
+            cls.last_sculpt_object = active_object.name
 
     @classmethod
     def selected_objects_center(cls):
@@ -1147,23 +1585,7 @@ class GamepadNavigationSession:
 
     @classmethod
     def contextual_focus(cls):
-        active_object = bpy.context.active_object
-        if (
-            active_object is not None
-            and active_object.mode == "SCULPT"
-            and cls.last_sculpt_object == active_object.name
-            and cls.last_sculpt_location is not None
-        ):
-            return cls.last_sculpt_location.copy()
-        if active_object is not None and active_object.mode == "EDIT":
-            component_center = cls.selected_components_center()
-            if component_center is not None:
-                return component_center
-        if bpy.context.mode == "OBJECT":
-            object_center = cls.selected_objects_center()
-            if object_center is not None:
-                return object_center
-        return None
+        return LargeSceneNavigationManager.contextual_focus()
 
     @classmethod
     def selected_components_center(cls):
@@ -1224,6 +1646,15 @@ class GamepadNavigationSession:
     @classmethod
     def focus_orbit_view(cls):
         cls.orbit_pivot = cls.orbit_focus()
+        if cls.rv3d is None or cls.orbit_pivot is None:
+            return
+        if getattr(cls.rv3d, "view_perspective", "PERSP") != "PERSP":
+            return
+        camera_position = cls.camera_position()
+        cls.rv3d.view_distance = max(
+            (camera_position - cls.orbit_pivot).length, 0.001
+        )
+        cls.set_camera_transform(camera_position, cls.rv3d.view_rotation.copy())
 
     @classmethod
     def camera_position(cls, rotation=None):
@@ -1276,6 +1707,7 @@ class GamepadNavigationSession:
             cls.last_time = time.perf_counter()
             cls.lb_was_down = False
             cls.previous_buttons = 0
+            cls.orbit_input_active = False
             cls.effective_mode = prefs.navigation_mode
             return 0.05
 
@@ -1354,6 +1786,7 @@ class GamepadNavigationSession:
             cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
             cls.movement_idle_time = 0.0
             cls.cancel_transition()
+            cls.orbit_input_active = False
 
         if prefs.invert_pan_y:
             ly = -ly
@@ -1415,6 +1848,13 @@ class GamepadNavigationSession:
             cls.pulse_vibration(prefs, strength=0.4)
 
         manual_input = max(abs(lx), abs(ly), abs(rx), abs(ry), lt, rt) > 0.01
+        orbit_input = (
+            cls.effective_mode == "ORBIT"
+            and max(abs(rx), abs(ry), lt, rt) > 0.01
+        )
+        if orbit_input and not cls.orbit_input_active:
+            cls.focus_orbit_view()
+        cls.orbit_input_active = orbit_input
         if manual_input:
             cls.cancel_transition()
         else:
@@ -1557,6 +1997,9 @@ class GamepadNavigationSession:
                     cls.orbit_pivot
                     + (camera_position - cls.orbit_pivot) * zoom_factor
                 )
+                rv3d.view_distance = max(
+                    (camera_position - cls.orbit_pivot).length, 0.001
+                )
                 cls.set_camera_transform(camera_position, rv3d.view_rotation.copy())
 
         cls.update_dynamic_clipping(prefs, now)
@@ -1566,6 +2009,83 @@ class GamepadNavigationSession:
 
 def gamepad_navigation_timer():
     return GamepadNavigationSession.tick()
+
+
+def large_scene_navigation_timer():
+    return LargeSceneNavigationManager.tick()
+
+
+@persistent
+def reset_large_scene_navigation(_dummy):
+    LargeSceneNavigationManager.reset()
+
+
+class VIEW3D_OT_large_scene_focus(bpy.types.Operator):
+    bl_idname = "view3d.large_scene_focus"
+    bl_label = "Return to Work Point"
+    bl_description = "Center the view on the remembered sculpt point or contextual selection"
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.area is not None
+            and context.area.type == "VIEW_3D"
+            and getattr(context.space_data, "region_3d", None) is not None
+        )
+
+    def execute(self, context):
+        focus = LargeSceneNavigationManager.contextual_focus(context)
+        if focus is None:
+            self.report({"INFO"}, "No sculpt work point or contextual selection")
+            return {"CANCELLED"}
+        rv3d = context.space_data.region_3d
+        rv3d.view_location = focus
+        if (
+            GamepadNavigationSession.active
+            and GamepadNavigationSession.area == context.area
+        ):
+            GamepadNavigationSession.orbit_pivot = focus.copy()
+        context.area.tag_redraw()
+        return {"FINISHED"}
+
+
+class VIEW3D_OT_large_scene_clear_focus(bpy.types.Operator):
+    bl_idname = "view3d.large_scene_clear_focus"
+    bl_label = "Clear Sculpt Work Point"
+    bl_description = "Forget the remembered sculpt point for the active object"
+
+    def execute(self, context):
+        key = LargeSceneNavigationManager.object_key(context.active_object)
+        if key is None or key not in LargeSceneNavigationManager.focus_by_object:
+            return {"CANCELLED"}
+        del LargeSceneNavigationManager.focus_by_object[key]
+        LargeSceneNavigationManager.focus_revision += 1
+        if GamepadNavigationSession.active:
+            GamepadNavigationSession.orbit_pivot = None
+        return {"FINISHED"}
+
+
+class VIEW3D_OT_large_scene_history(bpy.types.Operator):
+    bl_idname = "view3d.large_scene_history"
+    bl_label = "Large Scene View History"
+    bl_description = "Move backward or forward through settled viewport positions"
+
+    direction: EnumProperty(
+        items=(
+            ("BACK", "Previous", "Return to the previous view"),
+            ("FORWARD", "Next", "Advance to the next view"),
+        )
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.area is not None and context.area.type == "VIEW_3D"
+
+    def execute(self, context):
+        changed = LargeSceneNavigationManager.history_step(
+            context, -1 if self.direction == "BACK" else 1
+        )
+        return {"FINISHED"} if changed else {"CANCELLED"}
 
 
 class VIEW3D_OT_gamepad_calibrate(bpy.types.Operator):
@@ -1745,7 +2265,7 @@ class VIEW3D_OT_gamepad_bookmark_delete(bpy.types.Operator):
 
 
 class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
-    bl_label = "Gamepad Navigation"
+    bl_label = "Large Scene Navigation"
     bl_idname = "VIEW3D_PT_gamepad_navigation"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -1757,6 +2277,34 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
         prefs = addon.preferences if addon else None
 
         if prefs:
+            native_box = layout.box()
+            native_box.label(text="Mouse and Keyboard")
+            native_box.prop(prefs, "smart_navigation_enabled")
+            column = native_box.column()
+            column.enabled = prefs.smart_navigation_enabled
+            column.prop(prefs, "sculpt_focus_enabled")
+            column.prop(prefs, "native_orbit_around_focus")
+            column.prop(prefs, "native_zoom_to_mouse")
+            column.prop(prefs, "native_auto_depth")
+            column.prop(prefs, "native_view_history")
+            if prefs.native_view_history:
+                column.prop(prefs, "history_idle_delay")
+            column.prop(prefs, "dynamic_clipping")
+            focus = LargeSceneNavigationManager.sculpt_focus(context)
+            native_box.label(
+                text="Sculpt work point ready" if focus is not None else "No sculpt work point",
+                icon="PIVOT_CURSOR" if focus is not None else "RADIOBUT_OFF",
+            )
+            row = native_box.row(align=True)
+            row.operator("view3d.large_scene_focus", text="Work Point")
+            row.operator("view3d.large_scene_clear_focus", text="", icon="X")
+            row = native_box.row(align=True)
+            operator = row.operator("view3d.large_scene_history", text="Previous")
+            operator.direction = "BACK"
+            operator = row.operator("view3d.large_scene_history", text="Next")
+            operator.direction = "FORWARD"
+
+            layout.separator()
             layout.label(
                 text=(
                     "Controller Mode"
@@ -1826,7 +2374,6 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
                     layout.prop(prefs, "adaptive_start_distance")
                     layout.prop(prefs, "adaptive_min_speed")
                     layout.prop(prefs, "adaptive_curve")
-                layout.prop(prefs, "dynamic_clipping")
                 layout.prop(prefs, "horizon_stabilization")
                 if prefs.horizon_stabilization:
                     layout.prop(prefs, "horizon_strength")
@@ -1859,6 +2406,9 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
 classes = (
     GamepadViewBookmark,
     GamepadNavigationPreferences,
+    VIEW3D_OT_large_scene_focus,
+    VIEW3D_OT_large_scene_clear_focus,
+    VIEW3D_OT_large_scene_history,
     VIEW3D_OT_gamepad_calibrate,
     VIEW3D_OT_gamepad_navigation,
     VIEW3D_OT_gamepad_view_action,
@@ -1883,6 +2433,14 @@ def register():
         name="Bookmark Name", default=""
     )
 
+    LargeSceneNavigationManager.reset()
+    if reset_large_scene_navigation not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(reset_large_scene_navigation)
+    if not bpy.app.timers.is_registered(large_scene_navigation_timer):
+        bpy.app.timers.register(
+            large_scene_navigation_timer, first_interval=0.1, persistent=True
+        )
+
     wm = bpy.context.window_manager
     keyconfig = wm.keyconfigs.addon
     if keyconfig:
@@ -1897,6 +2455,13 @@ def unregister():
     GamepadNavigationSession.stop()
     if bpy.app.timers.is_registered(gamepad_navigation_timer):
         bpy.app.timers.unregister(gamepad_navigation_timer)
+    if bpy.app.timers.is_registered(large_scene_navigation_timer):
+        bpy.app.timers.unregister(large_scene_navigation_timer)
+    if reset_large_scene_navigation in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(reset_large_scene_navigation)
+    LargeSceneNavigationManager.restore_native_settings()
+    LargeSceneNavigationManager.restore_clipping()
+    LargeSceneNavigationManager.reset()
 
     for keymap, item in addon_keymaps:
         keymap.keymap_items.remove(item)

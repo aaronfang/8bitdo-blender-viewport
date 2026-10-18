@@ -24,6 +24,10 @@ through Windows XInput. It has no third-party Python dependencies.
 - Target focus/facing actions with interruptible smooth transitions.
 - Bidirectional view history and `.blend`-persistent named bookmarks.
 - Optional dynamic viewport clipping and horizon stabilization.
+- Native mouse and keyboard large-scene navigation assistance without replacing
+  Blender's keymap.
+- Persistent sculpt work points, native orbit/zoom targeting, and per-viewport
+  native view history.
 - Ground-walk navigation with slope, step, and collision controls.
 - Optional XInput vibration feedback.
 
@@ -123,6 +127,24 @@ overpowering close-surface precision.
 | Maximum Slope | Steepest surface normal accepted as walkable ground. |
 | Collision Avoidance | Prevents Ground mode from moving through forward geometry. |
 | Collision Radius | Clearance retained between the viewpoint and a detected obstacle. |
+
+### Mouse And Keyboard Large Scenes
+
+The **Large Scene Navigation** settings augment Blender's default MMB,
+Shift-MMB, Ctrl-MMB, wheel, and numpad navigation. The add-on can reversibly
+enable Blender's native Orbit Around Selection, Zoom to Mouse Position, and
+Auto Depth Navigation, so existing keymap muscle memory remains intact.
+
+In Sculpt Mode, the most recent valid stroke center is remembered per object in
+object-local coordinates. Recording it does not move the view. The next
+controller orbit or zoom gesture uses that work point, while native mouse
+orbiting follows Blender's own sculpt-stroke center behavior. **Work Point**
+centers the current viewport explicitly and **Previous/Next** navigate settled
+native viewport states independently in each open 3D Viewport.
+
+Dynamic clipping is managed per viewport and restores the previous values when
+disabled. Extremely large scenes can still suffer floating-point precision
+loss; keep working regions reasonably close to the world origin where practical.
 
 On entering Ground mode, the viewpoint first aligns to Ground Eye Height even
 when that correction is larger than Maximum Step. Maximum Step applies to
