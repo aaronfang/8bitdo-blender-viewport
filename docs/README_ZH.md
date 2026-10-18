@@ -98,6 +98,11 @@ Horizon Stabilization 会逐渐消除视角的侧向滚转，让世界 Z 轴保�
 
 ## HUD
 
+启动、重连或修改左摇杆曲线/死区/中点后，需要松开摇杆和扳机并保持回中
+0.15 秒才恢复导航。等待时 HUD 显示 INPUT PAUSED。如果松开后仍无法解除，
+先点击 Calibrate Left Stick Center；若中点不断改变，请检查手柄连接与硬件校准。
+Curve 小于 1 会放大死区外的微小输入，不会改变死区内的零输入。
+
 如果松开左摇杆后仍持续漂移，请松开摇杆，然后点击 N 面板的
 `Calibrate Left Stick Center` 校准实际中点。偏好设置中可以把 Left Center X/Y
 恢复为 0 来取消校准。该校准适用于稳定的中心偏移；如果手柄读数冻结，应重新连接

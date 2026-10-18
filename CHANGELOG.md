@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.3 - 2026-10-18
+
+- Require 150 ms of neutral analog input on start/reconnect and after changing
+  left-stick curve, deadzone, or calibration before accepting navigation input.
+- Clear movement, look, and pending ground displacement while waiting.
+- Show a neutral-input/calibration prompt in the status HUD.
+
 ## 1.4.2 - 2026-10-18
 
 - Add explicit left-stick center calibration for controllers with resting offsets.

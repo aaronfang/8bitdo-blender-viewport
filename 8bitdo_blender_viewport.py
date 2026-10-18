@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 4, 2),
+    "version": (1, 4, 3),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -134,6 +134,13 @@ def movement_velocity(current, target, acceleration, damping, idle_time, dt):
     return velocity, idle_time
 
 
+def neutral_input_gate(waiting, neutral_time, neutral, dt):
+    if not waiting:
+        return False, neutral_time
+    neutral_time = neutral_time + dt if neutral else 0.0
+    return neutral_time < 0.15, neutral_time
+
+
 def adaptive_response(distance_ratio, curve):
     """Return 0 at the surface and 1 at or beyond the start distance."""
     eased = smoothstep(distance_ratio)
@@ -163,6 +170,8 @@ def draw_gamepad_status():
     if session.show_hud:
         connection = "Connected" if session.connected else "Disconnected"
         lines.append(f"GAMEPAD  {session.effective_mode}  |  {connection}")
+        if session.waiting_for_neutral:
+            lines.append("INPUT PAUSED: release sticks/triggers; calibrate if needed")
         if session.effective_mode == "FLY":
             lines.append(
                 f"Move  {session.current_fly_speed:.3g} u/s  |  "
@@ -535,6 +544,9 @@ class GamepadNavigationSession:
     last_proximity_time = 0.0
     fly_velocity = Vector((0.0, 0.0, 0.0))
     movement_idle_time = 0.0
+    waiting_for_neutral = True
+    neutral_time = 0.0
+    input_settings = None
     look_velocity = Vector((0.0, 0.0))
     current_fly_speed = 0.0
     active_scene_scale = 1.0
@@ -589,6 +601,9 @@ class GamepadNavigationSession:
         cls.last_proximity_time = 0.0
         cls.fly_velocity = Vector((0.0, 0.0, 0.0))
         cls.movement_idle_time = 0.0
+        cls.waiting_for_neutral = True
+        cls.neutral_time = 0.0
+        cls.input_settings = None
         cls.look_velocity = Vector((0.0, 0.0))
         cls.current_fly_speed = 0.0
         cls.active_scene_scale = 1.0
@@ -1211,6 +1226,8 @@ class GamepadNavigationSession:
         cls.connected = result == 0
         cls.area.tag_redraw()
         if not cls.connected:
+            cls.waiting_for_neutral = True
+            cls.neutral_time = 0.0
             cls.fly_velocity = Vector((0.0, 0.0, 0.0))
             cls.look_velocity = Vector((0.0, 0.0))
             cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
@@ -1248,6 +1265,26 @@ class GamepadNavigationSession:
         )
         lt = trigger_value(gamepad.bLeftTrigger, prefs.trigger_deadzone)
         rt = trigger_value(gamepad.bRightTrigger, prefs.trigger_deadzone)
+
+        settings = (
+            prefs.left_stick_deadzone, prefs.left_stick_curve,
+            prefs.left_center_x, prefs.left_center_y,
+        )
+        if settings != cls.input_settings:
+            cls.input_settings = settings
+            cls.waiting_for_neutral = True
+            cls.neutral_time = 0.0
+        cls.waiting_for_neutral, cls.neutral_time = neutral_input_gate(
+            cls.waiting_for_neutral, cls.neutral_time,
+            not any((lx, ly, rx, ry, lt, rt)), dt,
+        )
+        if cls.waiting_for_neutral:
+            lx = ly = rx = ry = lt = rt = 0.0
+            cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+            cls.look_velocity = Vector((0.0, 0.0))
+            cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+            cls.movement_idle_time = 0.0
+            cls.cancel_transition()
 
         if prefs.invert_pan_y:
             ly = -ly

@@ -131,6 +131,11 @@ an idle controller does not continuously query scene geometry.
 
 ### Input And Display
 
+Starting, reconnecting, or editing left-stick curve/deadzone/calibration requires
+150 ms with all analog controls neutral before navigation resumes. The status
+HUD displays INPUT PAUSED while waiting. Calibrate the released left stick if
+needed. Curves below 1 amplify input outside the deadzone, never neutral input.
+
 If the released left stick still reports movement, release it and click
 `Calibrate Left Stick Center` in the N panel. Reset Left Center X/Y to zero in
 preferences to undo calibration. Stable offsets can be calibrated; frozen

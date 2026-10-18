@@ -29,6 +29,18 @@ def reset_scene():
 
 
 def test_input_math():
+    for curve in (0.25, 0.5, 1.0, 1.5, 4.0):
+        assert addon.axis_value(6655, 0.16, curve, 6655) == 0.0
+        assert addon.axis_value(7000, 0.16, curve, 6655) == 0.0
+    waiting, elapsed = True, 0.0
+    for _ in range(100):
+        waiting, elapsed = addon.neutral_input_gate(waiting, elapsed, False, 0.01)
+    assert waiting and elapsed == 0.0
+    for _ in range(20):
+        waiting, elapsed = addon.neutral_input_gate(waiting, elapsed, True, 0.01)
+    assert not waiting
+    waiting, _ = addon.neutral_input_gate(waiting, elapsed, False, 0.01)
+    assert not waiting  # deliberate movement is allowed after neutral confirmation
     assert addon.axis_value(6655, 0.16, 1.5, 6655) == 0.0
     assert addon.axis_value(-6145, 0.16, 1.5, -6145) == 0.0
     assert_close(addon.axis_value(32767, 0.16, 1.5, 6655), 1.0)
