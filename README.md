@@ -131,6 +131,12 @@ an idle controller does not continuously query scene geometry.
 
 ### Input And Display
 
+If the released left stick still reports movement, release it and click
+`Calibrate Left Stick Center` in the N panel. Reset Left Center X/Y to zero in
+preferences to undo calibration. Stable offsets can be calibrated; frozen
+controller readings require reconnecting the controller. Higher Fly Damping
+brakes faster; neutral input always stops movement within 0.5 seconds.
+
 Left/right stick deadzones and response curves are independent. A higher curve
 gives finer control around the center while retaining full output at the edge.
 

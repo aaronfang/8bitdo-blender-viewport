@@ -29,6 +29,22 @@ def reset_scene():
 
 
 def test_input_math():
+    assert addon.axis_value(6655, 0.16, 1.5, 6655) == 0.0
+    assert addon.axis_value(-6145, 0.16, 1.5, -6145) == 0.0
+    assert_close(addon.axis_value(32767, 0.16, 1.5, 6655), 1.0)
+    assert_close(addon.axis_value(-32768, 0.16, 1.5, 6655), -1.0)
+    velocity, idle = Vector((1.0, 0.0, 0.0)), 0.0
+    for _ in range(60):
+        velocity, idle = addon.movement_velocity(
+            velocity, Vector(), 10.0, 0.1, idle, 0.01
+        )
+    assert velocity.length == 0.0
+    velocity, idle = addon.movement_velocity(
+        Vector((1.0, 0.0, 0.0)), Vector((-1.0, 0.0, 0.0)),
+        10.0, 0.1, 0.4, 0.05,
+    )
+    assert velocity.x < 0.3
+    assert idle == 0.0
     assert addon.axis_value(1000, 0.16, 1.5) == 0.0
     assert addon.axis_value(32767, 0.16, 2.0) == 1.0
     linear = addon.axis_value(16384, 0.16, 1.0)

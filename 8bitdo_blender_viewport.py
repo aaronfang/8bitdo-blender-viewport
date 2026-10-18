@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 4, 1),
+    "version": (1, 4, 2),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -96,7 +96,10 @@ def load_xinput():
 XINPUT = load_xinput()
 
 
-def axis_value(raw, deadzone, response_curve=1.0):
+def axis_value(raw, deadzone, response_curve=1.0, center=0):
+    raw = (raw - center) * 32767.0 / max(
+        1.0, 32767.0 - center if raw >= center else 32768.0 + center
+    )
     value = max(-1.0, min(1.0, raw / 32767.0))
     magnitude = abs(value)
     if magnitude <= deadzone:
@@ -120,6 +123,15 @@ def exponential_blend(current, target, response, dt):
 def smoothstep(value):
     value = max(0.0, min(value, 1.0))
     return value * value * (3.0 - 2.0 * value)
+
+
+def movement_velocity(current, target, acceleration, damping, idle_time, dt):
+    idle_time = idle_time + dt if target.length == 0.0 else 0.0
+    response = damping if target.length == 0.0 else acceleration
+    velocity = exponential_blend(current, target, response, dt)
+    if target.length == 0.0 and (idle_time >= 0.5 or velocity.length <= 0.0001):
+        velocity = Vector((0.0, 0.0, 0.0))
+    return velocity, idle_time
 
 
 def adaptive_response(distance_ratio, curve):
@@ -246,6 +258,8 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         max=0.8,
         subtype="FACTOR",
     )
+    left_center_x: IntProperty(name="Left Center X", default=0, min=-12000, max=12000)
+    left_center_y: IntProperty(name="Left Center Y", default=0, min=-12000, max=12000)
     right_stick_deadzone: FloatProperty(
         name="Right Stick Deadzone",
         default=0.16,
@@ -318,7 +332,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     )
     fly_damping: FloatProperty(
         name="Fly Damping",
-        description="How quickly Fly movement stops after releasing the stick",
+        description="Higher values brake faster; neutral input always stops within 0.5 seconds",
         default=14.0,
         min=0.1,
         max=50.0,
@@ -460,6 +474,9 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "navigation_mode", expand=True)
         layout.prop(self, "controller_index")
         layout.prop(self, "left_stick_deadzone")
+        layout.operator("view3d.gamepad_calibrate", text="Calibrate Left Stick Center")
+        layout.prop(self, "left_center_x")
+        layout.prop(self, "left_center_y")
         layout.prop(self, "right_stick_deadzone")
         layout.prop(self, "left_stick_curve")
         layout.prop(self, "right_stick_curve")
@@ -517,6 +534,7 @@ class GamepadNavigationSession:
     adaptive_speed_scale = 1.0
     last_proximity_time = 0.0
     fly_velocity = Vector((0.0, 0.0, 0.0))
+    movement_idle_time = 0.0
     look_velocity = Vector((0.0, 0.0))
     current_fly_speed = 0.0
     active_scene_scale = 1.0
@@ -570,6 +588,7 @@ class GamepadNavigationSession:
         cls.adaptive_speed_scale = 1.0
         cls.last_proximity_time = 0.0
         cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+        cls.movement_idle_time = 0.0
         cls.look_velocity = Vector((0.0, 0.0))
         cls.current_fly_speed = 0.0
         cls.active_scene_scale = 1.0
@@ -1192,6 +1211,10 @@ class GamepadNavigationSession:
         cls.connected = result == 0
         cls.area.tag_redraw()
         if not cls.connected:
+            cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+            cls.look_velocity = Vector((0.0, 0.0))
+            cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+            cls.movement_idle_time = 0.0
             cls.last_time = time.perf_counter()
             cls.lb_was_down = False
             cls.previous_buttons = 0
@@ -1210,10 +1233,12 @@ class GamepadNavigationSession:
         cls.update_vibration(now)
 
         lx = axis_value(
-            gamepad.sThumbLX, prefs.left_stick_deadzone, prefs.left_stick_curve
+            gamepad.sThumbLX, prefs.left_stick_deadzone, prefs.left_stick_curve,
+            prefs.left_center_x,
         )
         ly = axis_value(
-            gamepad.sThumbLY, prefs.left_stick_deadzone, prefs.left_stick_curve
+            gamepad.sThumbLY, prefs.left_stick_deadzone, prefs.left_stick_curve,
+            prefs.left_center_y,
         )
         rx = axis_value(
             gamepad.sThumbRX, prefs.right_stick_deadzone, prefs.right_stick_curve
@@ -1344,13 +1369,9 @@ class GamepadNavigationSession:
             target_velocity = Vector((lx, ly, vertical))
             if rb_down:
                 target_velocity.z = 0.0
-            movement_response = (
-                prefs.fly_acceleration
-                if target_velocity.length > cls.fly_velocity.length
-                else prefs.fly_damping
-            )
-            cls.fly_velocity = exponential_blend(
-                cls.fly_velocity, target_velocity, movement_response, dt
+            cls.fly_velocity, cls.movement_idle_time = movement_velocity(
+                cls.fly_velocity, target_velocity, prefs.fly_acceleration,
+                prefs.fly_damping, cls.movement_idle_time, dt,
             )
 
             cls.current_fly_speed = cls.calculate_fly_speed(prefs)
@@ -1439,6 +1460,33 @@ class GamepadNavigationSession:
 
 def gamepad_navigation_timer():
     return GamepadNavigationSession.tick()
+
+
+class VIEW3D_OT_gamepad_calibrate(bpy.types.Operator):
+    bl_idname = "view3d.gamepad_calibrate"
+    bl_label = "Calibrate Left Stick Center"
+    bl_description = "Release the left stick, then click to record its resting center"
+
+    def execute(self, context):
+        addon = context.preferences.addons.get(ADDON_ID)
+        if addon is None or XINPUT is None:
+            return {"CANCELLED"}
+        prefs = addon.preferences
+        state = XINPUT_STATE()
+        if XINPUT.XInputGetState(prefs.controller_index, ctypes.byref(state)) != 0:
+            self.report({"WARNING"}, "Controller disconnected")
+            return {"CANCELLED"}
+        x, y = state.Gamepad.sThumbLX, state.Gamepad.sThumbLY
+        if max(abs(x), abs(y)) > 12000:
+            self.report({"WARNING"}, "Release the left stick before calibrating")
+            return {"CANCELLED"}
+        prefs.left_center_x, prefs.left_center_y = x, y
+        GamepadNavigationSession.fly_velocity = Vector((0.0, 0.0, 0.0))
+        GamepadNavigationSession.look_velocity = Vector((0.0, 0.0))
+        GamepadNavigationSession.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+        GamepadNavigationSession.movement_idle_time = 0.0
+        self.report({"INFO"}, f"Left stick center calibrated: {x}, {y}")
+        return {"FINISHED"}
 
 
 class VIEW3D_OT_gamepad_navigation(bpy.types.Operator):
@@ -1672,6 +1720,7 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
                 layout.prop(prefs, "pan_speed")
                 layout.prop(prefs, "zoom_speed")
             layout.prop(prefs, "left_stick_deadzone")
+            layout.operator("view3d.gamepad_calibrate", text="Calibrate Left Stick Center")
             layout.prop(prefs, "right_stick_deadzone")
             layout.prop(prefs, "left_stick_curve")
             layout.prop(prefs, "right_stick_curve")
@@ -1688,6 +1737,7 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
 classes = (
     GamepadViewBookmark,
     GamepadNavigationPreferences,
+    VIEW3D_OT_gamepad_calibrate,
     VIEW3D_OT_gamepad_navigation,
     VIEW3D_OT_gamepad_view_action,
     VIEW3D_OT_gamepad_bookmark_save,

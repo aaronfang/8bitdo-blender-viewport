@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.2 - 2026-10-18
+
+- Add explicit left-stick center calibration for controllers with resting offsets.
+- Stop neutral-input movement within 0.5 seconds even with low Fly Damping.
+- Use acceleration when new input arrives, including reversing direction.
+- Clear residual movement on controller disconnection.
+
 ## 1.4.1 - 2026-10-18
 
 - Allow the initial Ground alignment to raise a low viewpoint to Ground Eye

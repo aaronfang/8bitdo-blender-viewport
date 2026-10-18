@@ -98,6 +98,11 @@ Horizon Stabilization 会逐渐消除视角的侧向滚转，让世界 Z 轴保�
 
 ## HUD
 
+如果松开左摇杆后仍持续漂移，请松开摇杆，然后点击 N 面板的
+`Calibrate Left Stick Center` 校准实际中点。偏好设置中可以把 Left Center X/Y
+恢复为 0 来取消校准。该校准适用于稳定的中心偏移；如果手柄读数冻结，应重新连接
+手柄并检查 XInput。Fly Damping 越大刹停越快，回中后最多滑行 0.5 秒。
+
 - **Viewport Status**：模式、连接状态、实际速度、速度档、Scene/Adaptive
   倍率、表面距离以及 HEIGHT LOCK、GROUND、HORIZON、DYNAMIC CLIP 状态。
 - **Control Help**：在视窗左下角显示按键映射。
