@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.4 - 2026-10-18
+
+- Pause unchanged nonzero input after a configurable timeout (3 seconds by
+  default, 0 disables); perfectly steady held input can also trigger this guard.
+- Require neutral input after stale input starts updating again.
+- Add raw input/packet diagnostics and a calibration reset button. Reject
+  calibration while an active session has detected stalled input.
+- This guards against runaway navigation; it does not reset USB hardware.
+
 ## 1.4.3 - 2026-10-18
 
 - Require 150 ms of neutral analog input on start/reconnect and after changing

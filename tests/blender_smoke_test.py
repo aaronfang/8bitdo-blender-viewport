@@ -29,6 +29,17 @@ def reset_scene():
 
 
 def test_input_math():
+    signature = (1, (10000, 0))
+    _, last_change, stale = addon.input_watchdog(None, signature, 0.0, 1.0, 3.0, True)
+    assert not stale
+    _, _, stale = addon.input_watchdog(signature, signature, last_change, 4.1, 3.0, True)
+    assert stale
+    _, _, stale = addon.input_watchdog(signature, signature, last_change, 100.0, 3.0, False)
+    assert not stale  # unchanged neutral input is normal
+    _, _, stale = addon.input_watchdog(signature, signature, last_change, 100.0, 0.0, True)
+    assert not stale  # explicit disable permits long constant holds
+    _, changed, stale = addon.input_watchdog(signature, (2, (0, 0)), last_change, 4.2, 3.0, False)
+    assert not stale and changed == 4.2
     for curve in (0.25, 0.5, 1.0, 1.5, 4.0):
         assert addon.axis_value(6655, 0.16, curve, 6655) == 0.0
         assert addon.axis_value(7000, 0.16, curve, 6655) == 0.0

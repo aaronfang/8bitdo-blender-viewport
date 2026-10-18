@@ -131,6 +131,16 @@ an idle controller does not continuously query scene geometry.
 
 ### Input And Display
 
+`Unchanged Input Timeout` pauses repeated nonzero input after 3 seconds by
+default. XInput cannot distinguish a frozen state from perfectly steady held
+input; increase this timeout or set it to 0 for long constant holds. Neutral
+idle input does not trigger the guard. After data resumes, release the controls
+to rearm navigation. This does not reset the controller's USB connection.
+`Input Diagnostics` shows raw analog values, packet number, and unchanged time
+in the status HUD. If inputs do not change while operating the controller,
+reconnect it rather than calibrating the frozen readings. Use
+`Reset Stick Calibration` to discard an accidentally captured offset.
+
 Starting, reconnecting, or editing left-stick curve/deadzone/calibration requires
 150 ms with all analog controls neutral before navigation resumes. The status
 HUD displays INPUT PAUSED while waiting. Calibrate the released left stick if

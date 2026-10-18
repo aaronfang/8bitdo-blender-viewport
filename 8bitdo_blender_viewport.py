@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 4, 3),
+    "version": (1, 4, 4),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Navigate the 3D viewport with an XInput-compatible gamepad",
@@ -141,6 +141,13 @@ def neutral_input_gate(waiting, neutral_time, neutral, dt):
     return neutral_time < 0.15, neutral_time
 
 
+def input_watchdog(previous, signature, last_change, now, timeout, nonzero):
+    if signature != previous:
+        last_change = now
+    stale = timeout > 0.0 and nonzero and now - last_change >= timeout
+    return signature, last_change, stale
+
+
 def adaptive_response(distance_ratio, curve):
     """Return 0 at the surface and 1 at or beyond the start distance."""
     eased = smoothstep(distance_ratio)
@@ -172,6 +179,13 @@ def draw_gamepad_status():
         lines.append(f"GAMEPAD  {session.effective_mode}  |  {connection}")
         if session.waiting_for_neutral:
             lines.append("INPUT PAUSED: release sticks/triggers; calibrate if needed")
+        if session.input_stale:
+            lines.append("INPUT STALLED: old nonzero state; reconnect controller")
+        if session.show_input_diagnostics:
+            lines.append(
+                f"Packet {session.input_packet}  |  Unchanged {session.input_age:.1f}s"
+            )
+            lines.append(f"Raw LS/RS/LT/RT: {session.raw_input}")
         if session.effective_mode == "FLY":
             lines.append(
                 f"Move  {session.current_fly_speed:.3g} u/s  |  "
@@ -259,6 +273,15 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         default=0,
         min=0,
         max=3,
+    )
+    input_timeout: FloatProperty(
+        name="Unchanged Input Timeout",
+        description="Pause repeated nonzero XInput data after this many seconds; also pauses perfectly steady held input. Zero disables",
+        default=3.0, min=0.0, max=60.0,
+    )
+    show_input_diagnostics: BoolProperty(
+        name="Input Diagnostics", default=False,
+        description="Show raw controller axes, packet number and unchanged duration in the status HUD",
     )
     left_stick_deadzone: FloatProperty(
         name="Left Stick Deadzone",
@@ -482,6 +505,8 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
         layout = self.layout
         layout.prop(self, "navigation_mode", expand=True)
         layout.prop(self, "controller_index")
+        layout.prop(self, "input_timeout")
+        layout.prop(self, "show_input_diagnostics")
         layout.prop(self, "left_stick_deadzone")
         layout.operator("view3d.gamepad_calibrate", text="Calibrate Left Stick Center")
         layout.prop(self, "left_center_x")
@@ -547,6 +572,13 @@ class GamepadNavigationSession:
     waiting_for_neutral = True
     neutral_time = 0.0
     input_settings = None
+    input_signature = None
+    input_last_change = 0.0
+    input_age = 0.0
+    input_packet = 0
+    input_stale = False
+    raw_input = ()
+    show_input_diagnostics = False
     look_velocity = Vector((0.0, 0.0))
     current_fly_speed = 0.0
     active_scene_scale = 1.0
@@ -604,6 +636,13 @@ class GamepadNavigationSession:
         cls.waiting_for_neutral = True
         cls.neutral_time = 0.0
         cls.input_settings = None
+        cls.input_signature = None
+        cls.input_last_change = cls.last_time
+        cls.input_age = 0.0
+        cls.input_packet = 0
+        cls.input_stale = False
+        cls.raw_input = ()
+        cls.show_input_diagnostics = False
         cls.look_velocity = Vector((0.0, 0.0))
         cls.current_fly_speed = 0.0
         cls.active_scene_scale = 1.0
@@ -1226,6 +1265,8 @@ class GamepadNavigationSession:
         cls.connected = result == 0
         cls.area.tag_redraw()
         if not cls.connected:
+            cls.input_signature = None
+            cls.input_stale = False
             cls.waiting_for_neutral = True
             cls.neutral_time = 0.0
             cls.fly_velocity = Vector((0.0, 0.0, 0.0))
@@ -1266,9 +1307,37 @@ class GamepadNavigationSession:
         lt = trigger_value(gamepad.bLeftTrigger, prefs.trigger_deadzone)
         rt = trigger_value(gamepad.bRightTrigger, prefs.trigger_deadzone)
 
+        cls.raw_input = (
+            gamepad.sThumbLX, gamepad.sThumbLY, gamepad.sThumbRX,
+            gamepad.sThumbRY, gamepad.bLeftTrigger, gamepad.bRightTrigger,
+        )
+        cls.input_packet = int(state.dwPacketNumber)
+        signature = (prefs.controller_index, cls.input_packet, buttons, cls.raw_input)
+        was_stale = cls.input_stale
+        cls.input_signature, cls.input_last_change, cls.input_stale = input_watchdog(
+            cls.input_signature, signature, cls.input_last_change, now,
+            prefs.input_timeout, bool(any((lx, ly, rx, ry, lt, rt)) or buttons),
+        )
+        cls.input_age = now - cls.input_last_change
+        cls.show_input_diagnostics = prefs.show_input_diagnostics
+        cls.show_hud = prefs.show_hud
+        cls.show_control_hud = prefs.show_control_hud
+        if cls.input_stale or was_stale:
+            cls.waiting_for_neutral = True
+            cls.neutral_time = 0.0
+            cls.fly_velocity = Vector((0.0, 0.0, 0.0))
+            cls.look_velocity = Vector((0.0, 0.0))
+            cls.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+            cls.movement_idle_time = 0.0
+            cls.cancel_transition()
+            if cls.input_stale:
+                cls.height_locked = False
+                cls.previous_buttons = buttons
+                return 0.01
+
         settings = (
             prefs.left_stick_deadzone, prefs.left_stick_curve,
-            prefs.left_center_x, prefs.left_center_y,
+            prefs.left_center_x, prefs.left_center_y, prefs.controller_index,
         )
         if settings != cls.input_settings:
             cls.input_settings = settings
@@ -1503,12 +1572,25 @@ class VIEW3D_OT_gamepad_calibrate(bpy.types.Operator):
     bl_idname = "view3d.gamepad_calibrate"
     bl_label = "Calibrate Left Stick Center"
     bl_description = "Release the left stick, then click to record its resting center"
+    reset: BoolProperty(default=False, options={"SKIP_SAVE"})
 
     def execute(self, context):
         addon = context.preferences.addons.get(ADDON_ID)
         if addon is None or XINPUT is None:
             return {"CANCELLED"}
         prefs = addon.preferences
+        if self.reset:
+            prefs.left_center_x = prefs.left_center_y = 0
+            GamepadNavigationSession.fly_velocity = Vector((0.0, 0.0, 0.0))
+            GamepadNavigationSession.look_velocity = Vector((0.0, 0.0))
+            GamepadNavigationSession.pending_ground_delta = Vector((0.0, 0.0, 0.0))
+            GamepadNavigationSession.waiting_for_neutral = True
+            GamepadNavigationSession.neutral_time = 0.0
+            self.report({"INFO"}, "Left stick calibration reset")
+            return {"FINISHED"}
+        if GamepadNavigationSession.active and GamepadNavigationSession.input_stale:
+            self.report({"WARNING"}, "Input stalled; reconnect before calibrating")
+            return {"CANCELLED"}
         state = XINPUT_STATE()
         if XINPUT.XInputGetState(prefs.controller_index, ctypes.byref(state)) != 0:
             self.report({"WARNING"}, "Controller disconnected")
@@ -1729,6 +1811,8 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
         if prefs:
             layout.separator()
             layout.prop(prefs, "controller_index")
+            layout.prop(prefs, "input_timeout")
+            layout.prop(prefs, "show_input_diagnostics")
             layout.prop(prefs, "orbit_speed")
             if prefs.navigation_mode == "FLY":
                 layout.prop(prefs, "fly_speed")
@@ -1758,6 +1842,7 @@ class VIEW3D_PT_gamepad_navigation(bpy.types.Panel):
                 layout.prop(prefs, "zoom_speed")
             layout.prop(prefs, "left_stick_deadzone")
             layout.operator("view3d.gamepad_calibrate", text="Calibrate Left Stick Center")
+            layout.operator("view3d.gamepad_calibrate", text="Reset Stick Calibration").reset = True
             layout.prop(prefs, "right_stick_deadzone")
             layout.prop(prefs, "left_stick_curve")
             layout.prop(prefs, "right_stick_curve")

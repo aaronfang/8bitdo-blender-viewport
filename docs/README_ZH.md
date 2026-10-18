@@ -98,6 +98,14 @@ Horizon Stabilization 会逐渐消除视角的侧向滚转，让世界 Z 轴保�
 
 ## HUD
 
+`Unchanged Input Timeout` 默认 3 秒：非零输入和数据包编号持续不变时暂停运动。
+完全固定地保持摇杆或按键也可能触发，因为 XInput 无法区分固定输入与冻结。
+长距离恒定飞行可以调大数值或设为 0 关闭。正常零输入不会触发。
+读数恢复后需要回中再继续。此保护不能重置 USB 连接。
+开启 `Input Diagnostics` 可显示原始轴值、Packet 编号及持续不变时间。
+操作手柄时读数仍不改变，应重新连接，不要把冻结值校准成中点。
+`Reset Stick Calibration` 可以清除之前记录的错误偏移。
+
 启动、重连或修改左摇杆曲线/死区/中点后，需要松开摇杆和扳机并保持回中
 0.15 秒才恢复导航。等待时 HUD 显示 INPUT PAUSED。如果松开后仍无法解除，
 先点击 Calibrate Left Stick Center；若中点不断改变，请检查手柄连接与硬件校准。
