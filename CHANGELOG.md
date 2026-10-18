@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.1 - 2026-10-18
+
+- Update default Fly Move Speed to `30.0` for large-scene traversal.
+- Enable Adaptive Surface Speed by default.
+- Raise the default Maximum Slope to `89` degrees.
+- Enable Vibration Feedback by default at full strength.
+- Expand the viewport HUD with explicit A/B/X/Y action labels.
+
 ## 1.5.0 - 2026-10-18
 
 - Add opt-in large-scene mouse and keyboard navigation enhancements while

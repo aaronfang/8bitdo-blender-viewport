@@ -422,6 +422,15 @@ def test_native_view_history_is_per_viewport():
     manager.viewport_states.clear()
 
 
+def test_release_defaults():
+    properties = addon.GamepadNavigationPreferences.bl_rna.properties
+    assert_close(properties["fly_speed"].default, 30.0)
+    assert properties["adaptive_speed"].default
+    assert_close(math.degrees(properties["ground_slope_angle"].default), 89.0, 1.0e-4)
+    assert properties["vibration_feedback"].default
+    assert_close(properties["vibration_strength"].default, 1.0)
+
+
 def main():
     addon.register()
     try:
@@ -438,6 +447,7 @@ def main():
         test_native_navigation_rebase_preserves_view()
         test_sculpt_focus_follows_object_without_view_change()
         test_native_view_history_is_per_viewport()
+        test_release_defaults()
     finally:
         addon.unregister()
     print("ALL_TESTS_PASSED")

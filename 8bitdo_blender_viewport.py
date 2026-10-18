@@ -1,7 +1,7 @@
 bl_info = {
     "name": "8BitDo / XInput Viewport Navigation",
     "author": "Aaron Fang, OpenAI Codex",
-    "version": (1, 5, 0),
+    "version": (1, 5, 1),
     "blender": (4, 5, 0),
     "location": "3D Viewport > Sidebar > View > Gamepad Navigation",
     "description": "Large-scene mouse, keyboard, and XInput viewport navigation",
@@ -223,6 +223,11 @@ def draw_gamepad_status():
         if flags:
             lines.append("  |  ".join(flags))
 
+    if session.show_hud:
+        if lines:
+            lines.append("")
+        lines.append("A Focus Target    B Face Target    X Ground Walk    Y Level Horizon")
+
     if session.show_control_hud:
         if lines:
             lines.append("")
@@ -231,7 +236,7 @@ def draw_gamepad_status():
                 "LS Move/Pan    RS Look/Orbit    LT/RT Vertical/Zoom",
                 "LB Tap Toggle    LB/L3/R3 Hold Temporary Mode",
                 "RB Height Lock / Orbit Boost    D-pad Up/Down Speed",
-                "A Focus    B Face    X Ground    Y Level Horizon",
+                "A = Focus Target    B = Face Target    X = Ground Walk    Y = Level Horizon",
                 "D-pad Left/Right History    Back Stop",
             )
         )
@@ -382,7 +387,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     fly_speed: FloatProperty(
         name="Fly Move Speed",
         description="Free-flight speed in Blender units per second",
-        default=10.0,
+        default=30.0,
         min=0.001,
         soft_max=1000.0,
         max=1000000.0,
@@ -423,7 +428,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     adaptive_speed: BoolProperty(
         name="Adaptive Surface Speed",
         description="Slow Fly movement when approaching visible geometry",
-        default=False,
+        default=True,
     )
     adaptive_start_distance: FloatProperty(
         name="Adaptive Start Distance",
@@ -508,7 +513,7 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     )
     ground_slope_angle: FloatProperty(
         name="Maximum Slope",
-        default=math.radians(50.0),
+        default=math.radians(89.0),
         min=0.0,
         max=math.radians(89.0),
         subtype="ANGLE",
@@ -528,11 +533,11 @@ class GamepadNavigationPreferences(bpy.types.AddonPreferences):
     vibration_feedback: BoolProperty(
         name="Vibration Feedback",
         description="Use XInput vibration for mode, speed, ground, and collision events",
-        default=False,
+        default=True,
     )
     vibration_strength: FloatProperty(
         name="Vibration Strength",
-        default=0.35,
+        default=1.0,
         min=0.0,
         max=1.0,
         subtype="FACTOR",
